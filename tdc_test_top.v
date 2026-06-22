@@ -142,7 +142,7 @@ assign led[3:2] = 2'b00;
 
 
 // =====================================================
-// ★ 7. ROM 기반 실시간 캘리브레이션 (4-Stage 최고속 파이프라인)
+// ★ 7. ROM 기반 실시간 캘리브레이션 (5-Stage 뺄셈 분할 최적화)
 // =====================================================
 wire [12:0] calibrated_fine_ps;
 
@@ -153,7 +153,7 @@ reg        ts_valid_d1;
 reg        test_hit_d1;
 reg [8:0]  ts_fine_idx_d1;
 
-// [Stage 2] 병렬 곱셈 수행 및 ROM 출력 래치
+// [Stage 2] 병렬 DSP 곱셈
 (* use_dsp = "yes" *) reg [31:0] mul_L_d2;
 (* use_dsp = "yes" *) reg [47:0] mul_H_d2;
 reg [12:0] calibrated_fine_ps_d2;
@@ -162,96 +162,107 @@ reg        test_hit_d2;
 reg [8:0]  ts_fine_idx_d2;
 reg [31:0] ts_coarse_d2;
 
-// [Stage 3] 상위/하위 Coarse 시간 64비트 덧셈 (덧셈만 먼저 수행)
+// [Stage 3] 64비트 덧셈 (Coarse 총 시간 병합)
 reg [63:0] coarse_total_ps_d3;
-reg [12:0] calibrated_fine_ps_d3; // 뺄셈을 위해 데이터 유지
+reg [12:0] calibrated_fine_ps_d3; 
 reg        ts_valid_d3;
 reg        test_hit_d3;
 reg [8:0]  ts_fine_idx_d3;
 reg [31:0] ts_coarse_d3;
 
-// [Stage 4] 최종 64비트 뺄셈 수행 (ROM 보정값 적용)
-reg [63:0] final_absolute_time_ps_reg;
+// -----------------------------------------------------------
+// [Stage 4] 하위 32비트 뺄셈 및 Borrow(빌림) 캡처
+// 64비트 뺄셈의 지연시간을 줄이기 위해 여기서 하위 32비트만 먼저 뺍니다.
+// -----------------------------------------------------------
+reg [32:0] sub_lower_d4;  // 33비트 (최상위 비트는 언더플로우 빌림 확인용)
+reg [31:0] upper_half_d4; // 상위 32비트는 그대로 전달
 reg        ts_valid_d4;
 reg        test_hit_d4;
 reg [8:0]  ts_fine_idx_d4;
 reg [31:0] ts_coarse_d4;
+reg [12:0] calibrated_fine_ps_d4;
+
+// -----------------------------------------------------------
+// [Stage 5] 상위 32비트 뺄셈 적용 및 최종 64비트 결합
+// -----------------------------------------------------------
+reg [63:0] final_absolute_time_ps_reg;
+reg        ts_valid_d5;
+reg        test_hit_d5;
+reg [8:0]  ts_fine_idx_d5;
+reg [31:0] ts_coarse_d5;
+reg [12:0] calibrated_fine_ps_d5;
 
 
 // ROM IP 인스턴스화
 blk_mem_gen_0 u_lut_rom (
   .clka  (tdc_clk),            
   .ena   (1'b1),               
-  .addra (ts_fine_idx),        // Stage 0: 주소 입력
-  .douta (calibrated_fine_ps)  // Stage 1: 데이터 나옴
+  .addra (ts_fine_idx),        
+  .douta (calibrated_fine_ps)  
 );
 
 // 파이프라인 연산 처리 블록
 always @(posedge tdc_clk) begin
     if (!clk_locked) begin
-        // 리셋 초기화
         ts_coarse_L_d1 <= 0; ts_coarse_H_d1 <= 0; ts_valid_d1 <= 0; test_hit_d1 <= 0; ts_fine_idx_d1 <= 0;
-        mul_L_d2 <= 0; mul_H_d2 <= 0; calibrated_fine_ps_d2 <= 0;
-        ts_coarse_d2 <= 0; ts_valid_d2 <= 0; test_hit_d2 <= 0; ts_fine_idx_d2 <= 0;
-        coarse_total_ps_d3 <= 0; calibrated_fine_ps_d3 <= 0;
-        ts_coarse_d3 <= 0; ts_valid_d3 <= 0; test_hit_d3 <= 0; ts_fine_idx_d3 <= 0;
-        final_absolute_time_ps_reg <= 0;
-        ts_coarse_d4 <= 0; ts_valid_d4 <= 0; test_hit_d4 <= 0; ts_fine_idx_d4 <= 0;
+        mul_L_d2 <= 0; mul_H_d2 <= 0; calibrated_fine_ps_d2 <= 0; ts_coarse_d2 <= 0; ts_valid_d2 <= 0; test_hit_d2 <= 0; ts_fine_idx_d2 <= 0;
+        coarse_total_ps_d3 <= 0; calibrated_fine_ps_d3 <= 0; ts_coarse_d3 <= 0; ts_valid_d3 <= 0; test_hit_d3 <= 0; ts_fine_idx_d3 <= 0;
+        sub_lower_d4 <= 0; upper_half_d4 <= 0; ts_valid_d4 <= 0; test_hit_d4 <= 0; ts_fine_idx_d4 <= 0; ts_coarse_d4 <= 0; calibrated_fine_ps_d4 <= 0;
+        final_absolute_time_ps_reg <= 0; ts_valid_d5 <= 0; test_hit_d5 <= 0; ts_fine_idx_d5 <= 0; ts_coarse_d5 <= 0; calibrated_fine_ps_d5 <= 0;
     end else begin
-        // ----------------------------------------------------
-        // [Stage 1] 16비트씩 반으로 쪼개기
-        // ----------------------------------------------------
+        // [Stage 1]
         ts_coarse_L_d1 <= ts_coarse[15:0];
         ts_coarse_H_d1 <= ts_coarse[31:16];
         ts_valid_d1    <= ts_valid;
         test_hit_d1    <= test_hit;
         ts_fine_idx_d1 <= ts_fine_idx;
 
-        // ----------------------------------------------------
-        // [Stage 2] 병렬 DSP 곱셈
-        // ----------------------------------------------------
+        // [Stage 2]
         mul_L_d2              <= ts_coarse_L_d1 * 16'd5000;
         mul_H_d2              <= ts_coarse_H_d1 * 16'd5000;
-        calibrated_fine_ps_d2 <= calibrated_fine_ps; // ROM에서 나온 보정값
-        
+        calibrated_fine_ps_d2 <= calibrated_fine_ps; 
         ts_coarse_d2   <= {ts_coarse_H_d1, ts_coarse_L_d1};
         ts_valid_d2    <= ts_valid_d1;
         test_hit_d2    <= test_hit_d1;
         ts_fine_idx_d2 <= ts_fine_idx_d1;
 
-        // ----------------------------------------------------
-        // [Stage 3] 64비트 덧셈 (Coarse 총 시간 병합) - "여기서 덧셈만 합니다"
-        // ----------------------------------------------------
+        // [Stage 3]
         coarse_total_ps_d3    <= {mul_H_d2[47:0], 16'd0} + mul_L_d2;
-        calibrated_fine_ps_d3 <= calibrated_fine_ps_d2; // 다음 클럭으로 보정값 넘기기
-        
+        calibrated_fine_ps_d3 <= calibrated_fine_ps_d2; 
         ts_coarse_d3   <= ts_coarse_d2;
         ts_valid_d3    <= ts_valid_d2;
         test_hit_d3    <= test_hit_d2;
         ts_fine_idx_d3 <= ts_fine_idx_d2;
 
-        // ----------------------------------------------------
-        // [Stage 4] 64비트 뺄셈 (최종 물리 시간 도출) - "여기서 뺄셈만 합니다"
-        // ----------------------------------------------------
-        final_absolute_time_ps_reg <= coarse_total_ps_d3 - calibrated_fine_ps_d3;
-        
+        // [Stage 4] 하위 32비트만 먼저 뺄셈 (Levels 반토막!)
+        sub_lower_d4          <= {1'b0, coarse_total_ps_d3[31:0]} - {20'd0, calibrated_fine_ps_d3};
+        upper_half_d4         <= coarse_total_ps_d3[63:32];
+        calibrated_fine_ps_d4 <= calibrated_fine_ps_d3;
         ts_coarse_d4   <= ts_coarse_d3;
         ts_valid_d4    <= ts_valid_d3;
         test_hit_d4    <= test_hit_d3;
         ts_fine_idx_d4 <= ts_fine_idx_d3;
+
+        // [Stage 5] 하위 뺄셈에서 빌림(sub_lower_d4[32])이 발생했으면 상위에서 1을 빼줌
+        final_absolute_time_ps_reg <= { (upper_half_d4 - {31'd0, sub_lower_d4[32]}), sub_lower_d4[31:0] };
+        calibrated_fine_ps_d5      <= calibrated_fine_ps_d4;
+        ts_coarse_d5   <= ts_coarse_d4;
+        ts_valid_d5    <= ts_valid_d4;
+        test_hit_d5    <= test_hit_d4;
+        ts_fine_idx_d5 <= ts_fine_idx_d4;
     end
 end
 
 // =====================================================
-// ★ 8. ILA 모듈 연동 
+// ★ 8. ILA 모듈 연동 (Stage 5에 맞춤)
 // =====================================================
-// Stage 4까지 밀려난 신호들을 모아서 관찰해야 짝이 맞습니다!
 ila_0 your_ila_instance (
     .clk    (tdc_clk),                 
-    .probe0 (ts_valid_d4),             // d4 로 변경
-    .probe1 (ts_coarse_d4),            // d4 로 변경
-    .probe2 (ts_fine_idx_d4),          // d4 로 변경
-    .probe3 (test_hit_d4),             // d4 로 변경
-    .probe4 (final_absolute_time_ps_reg) 
+    .probe0 (ts_valid_d5),             
+    .probe1 (ts_coarse_d5),            
+    .probe2 (ts_fine_idx_d5),          
+    .probe3 (test_hit_d5),             
+    .probe4 (final_absolute_time_ps_reg), 
+    .probe5 (calibrated_fine_ps_d5)    
 );
 endmodule

@@ -14,7 +14,7 @@ NUM_TAPS = 320                  # TDC 총 탭 수
 
 def run_calibration_flow():
     # =====================================================================
-    # 1. 파일 자동 탐색 및 데이터 통합
+    # 1. 파일 자동 탐색 및 데이터 통합 (스마트 열 탐색 적용)
     # =====================================================================
     search_path = os.path.join(FOLDER_PATH, FILE_PATTERN)
     file_list = sorted(glob.glob(search_path))
@@ -22,20 +22,31 @@ def run_calibration_flow():
         raise FileNotFoundError("대상 CSV 파일을 찾을 수 없습니다. 경로를 확인하세요.")
         
     df_list = []
+    fine_col_name_global = "" # fine_idx 컬럼명 저장용 변수
+    
     for file in file_list:
         # 두 번째 줄의 Radix 라인 스킵
         temp_df = pd.read_csv(file, skiprows=[1])
         temp_df.columns = [col.split('[')[0].strip() for col in temp_df.columns]
-        # ts_coarse HEX를 int로 변환
-        temp_df['ts_coarse'] = temp_df['ts_coarse'].apply(
+        
+        # 이름에 'ts_coarse'와 'ts_fine_idx'가 포함된 열(Column)을 자동으로 찾음
+        coarse_col = [col for col in temp_df.columns if 'ts_coarse' in col][0]
+        fine_col = [col for col in temp_df.columns if 'ts_fine_idx' in col][0]
+        fine_col_name_global = fine_col
+        
+        # 찾은 coarse 열을 기준으로 HEX를 int로 변환
+        temp_df[coarse_col] = temp_df[coarse_col].apply(
             lambda x: int(str(x).strip(), 16) if pd.notnull(x) else np.nan
         )
         df_list.append(temp_df)
         
     combined_df = pd.concat(df_list, ignore_index=True)
-    fine_data = combined_df['ts_fine_idx'].dropna().astype(int).values
-    total_samples = len(fine_data)
     
+    # 찾은 fine_idx 열을 기준으로 데이터 추출
+    fine_data = combined_df[fine_col_name_global].dropna().astype(int).values
+    total_samples = len(fine_data)
+
+
     # =====================================================================
     # 2. 통계 기반 캘리브레이션 (Code Density Test) 및 DNL/INL 계산
     # =====================================================================
