@@ -142,55 +142,116 @@ assign led[3:2] = 2'b00;
 
 
 // =====================================================
-// ★ 7. ROM 기반 실시간 캘리브레이션 (LUT 적용 파이프라인)
+// ★ 7. ROM 기반 실시간 캘리브레이션 (4-Stage 최고속 파이프라인)
 // =====================================================
-wire [12:0] calibrated_fine_ps; // ROM 출력 (ps 단위의 딜레이값)
+wire [12:0] calibrated_fine_ps;
 
-// ROM 읽기 지연(1 클럭)을 보상하기 위한 파이프라인 레지스터 선언
-reg [31:0] ts_coarse_d1;
+// [Stage 1] 입력 래치 및 16비트 분할
+reg [15:0] ts_coarse_L_d1;
+reg [15:0] ts_coarse_H_d1;
 reg        ts_valid_d1;
 reg        test_hit_d1;
+reg [8:0]  ts_fine_idx_d1;
+
+// [Stage 2] 병렬 곱셈 수행 및 ROM 출력 래치
+(* use_dsp = "yes" *) reg [31:0] mul_L_d2;
+(* use_dsp = "yes" *) reg [47:0] mul_H_d2;
+reg [12:0] calibrated_fine_ps_d2;
+reg        ts_valid_d2;
+reg        test_hit_d2;
+reg [8:0]  ts_fine_idx_d2;
+reg [31:0] ts_coarse_d2;
+
+// [Stage 3] 상위/하위 Coarse 시간 64비트 덧셈 (덧셈만 먼저 수행)
+reg [63:0] coarse_total_ps_d3;
+reg [12:0] calibrated_fine_ps_d3; // 뺄셈을 위해 데이터 유지
+reg        ts_valid_d3;
+reg        test_hit_d3;
+reg [8:0]  ts_fine_idx_d3;
+reg [31:0] ts_coarse_d3;
+
+// [Stage 4] 최종 64비트 뺄셈 수행 (ROM 보정값 적용)
+reg [63:0] final_absolute_time_ps_reg;
+reg        ts_valid_d4;
+reg        test_hit_d4;
+reg [8:0]  ts_fine_idx_d4;
+reg [31:0] ts_coarse_d4;
+
 
 // ROM IP 인스턴스화
 blk_mem_gen_0 u_lut_rom (
-  .clka  (tdc_clk),            // 동기화를 위해 반드시 tdc_clk 사용
-  .ena   (1'b1),               // 항상 Enable
-  .addra (ts_fine_idx),        // TDC에서 출력된 원시 탭 번호를 주소로 입력
-  .douta (calibrated_fine_ps)  // 1클럭 뒤에 보정된 시간값(ps) 출력
+  .clka  (tdc_clk),            
+  .ena   (1'b1),               
+  .addra (ts_fine_idx),        // Stage 0: 주소 입력
+  .douta (calibrated_fine_ps)  // Stage 1: 데이터 나옴
 );
 
-// 타이밍 정렬 블록 (1 클럭 지연)
+// 파이프라인 연산 처리 블록
 always @(posedge tdc_clk) begin
     if (!clk_locked) begin
-        ts_coarse_d1 <= 32'd0;
-        ts_valid_d1  <= 1'b0;
-        test_hit_d1  <= 1'b0;
+        // 리셋 초기화
+        ts_coarse_L_d1 <= 0; ts_coarse_H_d1 <= 0; ts_valid_d1 <= 0; test_hit_d1 <= 0; ts_fine_idx_d1 <= 0;
+        mul_L_d2 <= 0; mul_H_d2 <= 0; calibrated_fine_ps_d2 <= 0;
+        ts_coarse_d2 <= 0; ts_valid_d2 <= 0; test_hit_d2 <= 0; ts_fine_idx_d2 <= 0;
+        coarse_total_ps_d3 <= 0; calibrated_fine_ps_d3 <= 0;
+        ts_coarse_d3 <= 0; ts_valid_d3 <= 0; test_hit_d3 <= 0; ts_fine_idx_d3 <= 0;
+        final_absolute_time_ps_reg <= 0;
+        ts_coarse_d4 <= 0; ts_valid_d4 <= 0; test_hit_d4 <= 0; ts_fine_idx_d4 <= 0;
     end else begin
-        ts_coarse_d1 <= ts_coarse;
-        ts_valid_d1  <= ts_valid;
-        test_hit_d1  <= test_hit;
+        // ----------------------------------------------------
+        // [Stage 1] 16비트씩 반으로 쪼개기
+        // ----------------------------------------------------
+        ts_coarse_L_d1 <= ts_coarse[15:0];
+        ts_coarse_H_d1 <= ts_coarse[31:16];
+        ts_valid_d1    <= ts_valid;
+        test_hit_d1    <= test_hit;
+        ts_fine_idx_d1 <= ts_fine_idx;
+
+        // ----------------------------------------------------
+        // [Stage 2] 병렬 DSP 곱셈
+        // ----------------------------------------------------
+        mul_L_d2              <= ts_coarse_L_d1 * 16'd5000;
+        mul_H_d2              <= ts_coarse_H_d1 * 16'd5000;
+        calibrated_fine_ps_d2 <= calibrated_fine_ps; // ROM에서 나온 보정값
+        
+        ts_coarse_d2   <= {ts_coarse_H_d1, ts_coarse_L_d1};
+        ts_valid_d2    <= ts_valid_d1;
+        test_hit_d2    <= test_hit_d1;
+        ts_fine_idx_d2 <= ts_fine_idx_d1;
+
+        // ----------------------------------------------------
+        // [Stage 3] 64비트 덧셈 (Coarse 총 시간 병합) - "여기서 덧셈만 합니다"
+        // ----------------------------------------------------
+        coarse_total_ps_d3    <= {mul_H_d2[47:0], 16'd0} + mul_L_d2;
+        calibrated_fine_ps_d3 <= calibrated_fine_ps_d2; // 다음 클럭으로 보정값 넘기기
+        
+        ts_coarse_d3   <= ts_coarse_d2;
+        ts_valid_d3    <= ts_valid_d2;
+        test_hit_d3    <= test_hit_d2;
+        ts_fine_idx_d3 <= ts_fine_idx_d2;
+
+        // ----------------------------------------------------
+        // [Stage 4] 64비트 뺄셈 (최종 물리 시간 도출) - "여기서 뺄셈만 합니다"
+        // ----------------------------------------------------
+        final_absolute_time_ps_reg <= coarse_total_ps_d3 - calibrated_fine_ps_d3;
+        
+        ts_coarse_d4   <= ts_coarse_d3;
+        ts_valid_d4    <= ts_valid_d3;
+        test_hit_d4    <= test_hit_d3;
+        ts_fine_idx_d4 <= ts_fine_idx_d3;
     end
 end
 
-// 최종 물리적 정밀 시간 도출 (단위: ps)
-wire [63:0] final_absolute_time_ps;
-
-// 수식: (Coarse 시간 * 5000ps) - LUT에서 나온 Fine 시간(ps)
-assign final_absolute_time_ps = (ts_coarse_d1 * 32'd5000) - calibrated_fine_ps;
-
-
 // =====================================================
-// ★ 8. ILA 모듈 연동 (포트 업데이트 필요)
+// ★ 8. ILA 모듈 연동 
 // =====================================================
-// ※ 주의: Vivado에서 ILA IP를 열고 probe4(64bit)를 추가로 생성해 주셔야 합니다!
-// ※ CDC(Clock Domain Crossing) 방지를 위해 ILA 클럭도 tdc_clk로 연결했습니다.
+// Stage 4까지 밀려난 신호들을 모아서 관찰해야 짝이 맞습니다!
 ila_0 your_ila_instance (
-    .clk    (tdc_clk),                 // 클럭 도메인 통일
-    .probe0 (ts_valid_d1),             // 1클럭 밀린 valid 
-    .probe1 (ts_coarse_d1),            // 1클럭 밀린 coarse
-    .probe2 (ts_fine_idx),             // 원시 index 확인용 (밀리지 않음)
-    .probe3 (test_hit_d1),             // 1클럭 밀린 hit
-    .probe4 (final_absolute_time_ps)   // [추가됨] 64비트 정밀 물리 시간 (ps)
+    .clk    (tdc_clk),                 
+    .probe0 (ts_valid_d4),             // d4 로 변경
+    .probe1 (ts_coarse_d4),            // d4 로 변경
+    .probe2 (ts_fine_idx_d4),          // d4 로 변경
+    .probe3 (test_hit_d4),             // d4 로 변경
+    .probe4 (final_absolute_time_ps_reg) 
 );
-
 endmodule
