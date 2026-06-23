@@ -1,57 +1,82 @@
+`timescale 1ns / 1ps
+
 module mmcm_phase_shifter (
-    input wire clk,
-    input wire rst_n,
-    input wire start_shift,
-    output reg        psen,
-    output reg        psincdec,
-    input  wire       psdone,
-    output reg        busy
+    input  wire       clk, 
+    input  wire       rst_n, 
+    input  wire       start_shift,  
+    output reg        psen, 
+    output reg        psincdec, 
+    input  wire       psdone, 
+    output reg        busy,
+    output reg [8:0]  loop_cnt     // 스텝 번호 출력 (0 ~ 280)
 );
 
-localparam IDLE  = 2'd0;
-localparam START = 2'd1;
-localparam WAIT  = 2'd2;
+localparam IDLE       = 3'd0;
+localparam SHIFT      = 3'd1;
+localparam WAIT_DONE  = 3'd2;
+localparam DELAY      = 3'd3;
 
-reg [1:0] state;
-reg start_shift_d1, start_shift_edge;
+reg [2:0]  state;
+reg        start_shift_d1, start_shift_edge;
+reg [17:0] delay_cnt;   
+  
+localparam DELAY_MAX = 18'd200_000; // 200MHz 기준 1ms 대기 (17.85ps씩 천천히 스윕)
 
-// 입력 버튼 신호 에지 검출 (채터링 방지 및 1회 인가용)
-always @(posedge clk) begin
-    start_shift_d1 <= start_shift;
-    start_shift_edge <= (start_shift && !start_shift_d1);
+always @(posedge clk) begin 
+    start_shift_d1 <= start_shift; 
+    start_shift_edge <= (start_shift && !start_shift_d1); 
 end
 
 always @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-        psen <= 1'b0;
-        psincdec <= 1'b0;
-        busy <= 1'b0;
-        state <= IDLE;
+    if (!rst_n) begin 
+        psen <= 0; 
+        psincdec <= 0; 
+        busy <= 0; 
+        loop_cnt <= 0; 
+        delay_cnt <= 0; 
+        state <= IDLE; 
     end else begin
         case (state)
-            IDLE: begin
-                psen <= 1'b0;
-                if (start_shift_edge) begin
-                    busy <= 1'b1;
-                    state <= START;
+            IDLE: begin 
+                psen <= 0; 
+                delay_cnt <= 0;
+                if (start_shift_edge) begin 
+                    busy <= 1; 
+                    loop_cnt <= 0; 
+                    state <= SHIFT; 
                 end else begin
-                    busy <= 1'b0;
+                    busy <= 0; 
                 end
             end
             
-            START: begin
-                psen <= 1'b1;
-                psincdec <= 1'b1; // 1: 시간 지연 방향
-                state <= WAIT;
+            SHIFT: begin 
+                psen <= 1; 
+                psincdec <= 1; // 1: 위상 지연 방향
+                state <= WAIT_DONE; 
             end
             
-            WAIT: begin
-                psen <= 1'b0;
-                if (psdone) begin
-                    busy <= 1'b0;
-                    state <= IDLE;
+            WAIT_DONE: begin 
+                psen <= 0; 
+                if (psdone) begin 
+                    loop_cnt <= loop_cnt + 1'b1; 
+                    state <= DELAY; 
+                end 
+            end
+            
+            DELAY: begin
+                if (delay_cnt == DELAY_MAX) begin
+                    delay_cnt <= 0;
+                    if (loop_cnt == 9'd280) begin 
+                        busy <= 0; 
+                        state <= IDLE; // 280번 완료 시 종료
+                    end else begin
+                        state <= SHIFT; // 다음 스텝 진행
+                    end 
+                end else begin
+                    delay_cnt <= delay_cnt + 1'b1;
                 end
             end
+            
             default: state <= IDLE;
         endcase
     end

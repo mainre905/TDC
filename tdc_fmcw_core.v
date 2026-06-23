@@ -53,6 +53,8 @@ endfunction
 // -------------------------------------------------------------------------
 // 3. CARRY4 CHAIN & DIRECT DFF 연결
 // -------------------------------------------------------------------------
+(* keep = "true" *) wire rst_high = ~rst_n;
+
 genvar k;
 generate
     for (k = 0; k < CARRY4_STAGES; k = k + 1) begin : CARRY_CHAIN
@@ -75,11 +77,14 @@ generate
                 .S  (4'b1111)
             );
         end
-        // BEL 속성을 사용하여 CARRY4와 같은 슬라이스 내의 FF로 강제 매핑			   
-        (* BEL = "AFF" *) FDCE u_ff_0 ( .Q(taps_sampled[(k*4)+0]), .C(clk), .CE(1'b1), .CLR(~rst_n), .D(carry_o[(k*4)+0]) );								   
-        (* BEL = "BFF" *) FDCE u_ff_1 ( .Q(taps_sampled[(k*4)+1]), .C(clk), .CE(1'b1), .CLR(~rst_n), .D(carry_o[(k*4)+1]) );									   
-        (* BEL = "CFF" *) FDCE u_ff_2 ( .Q(taps_sampled[(k*4)+2]), .C(clk), .CE(1'b1), .CLR(~rst_n), .D(carry_o[(k*4)+2]) );		
-        (* BEL = "DFF" *) FDCE u_ff_3 ( .Q(taps_sampled[(k*4)+3]), .C(clk), .CE(1'b1), .CLR(~rst_n), .D(carry_o[(k*4)+3]) );
+        
+        // ★ [궁극의 해결책] 
+        // 1. BEL 속성 제거 (XDC 제약이 알아서 해줌)
+        // 2. FDCE 대신 FDC 사용 (CE 핀 삭제로 더미 게이트 생성 원천 차단)
+        (* DONT_TOUCH = "TRUE" *) FDC u_ff_0 ( .Q(taps_sampled[(k*4)+0]), .C(clk), .CLR(rst_high), .D(carry_o[(k*4)+0]) );								   
+        (* DONT_TOUCH = "TRUE" *) FDC u_ff_1 ( .Q(taps_sampled[(k*4)+1]), .C(clk), .CLR(rst_high), .D(carry_o[(k*4)+1]) );									   
+        (* DONT_TOUCH = "TRUE" *) FDC u_ff_2 ( .Q(taps_sampled[(k*4)+2]), .C(clk), .CLR(rst_high), .D(carry_o[(k*4)+2]) );		
+        (* DONT_TOUCH = "TRUE" *) FDC u_ff_3 ( .Q(taps_sampled[(k*4)+3]), .C(clk), .CLR(rst_high), .D(carry_o[(k*4)+3]) );
     end
 endgenerate
 

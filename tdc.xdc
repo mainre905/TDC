@@ -1,4 +1,3 @@
-
 #=====================================================
 #1. ZYBO BOARD PIN & I/O STANDARD
 #=====================================================
@@ -8,8 +7,8 @@ set_property IOSTANDARD LVCMOS33 [get_ports clk_125]
 set_property PACKAGE_PIN K18 [get_ports rst_n]
 set_property IOSTANDARD LVCMOS33 [get_ports rst_n]
 
-set_property PACKAGE_PIN P16 [get_ports rst_n]
-set_property IOSTANDARD LVCMOS33 [get_ports rst_n]
+set_property PACKAGE_PIN P16 [get_ports btn_shift]
+set_property IOSTANDARD LVCMOS33 [get_ports btn_shift]
 
 set_property PACKAGE_PIN M14 [get_ports {led[0]}]
 set_property PACKAGE_PIN M15 [get_ports {led[1]}]
@@ -25,13 +24,17 @@ set_property ALLOW_COMBINATORIAL_LOOPS true [get_nets -hierarchical -filter {NAM
 #=====================================================
 #3. TDC CARRY4 & SAMPLING REGISTER 최적화
 #=====================================================
-set_property DONT_TOUCH true [get_cells -hierarchical -filter {NAME =~ *u_tdc* && REF_NAME == CARRY4}]
-set_property DONT_TOUCH true [get_cells -hierarchical -filter {NAME =~ *u_ff_*}]
-set_property ASYNC_REG false [get_cells -hierarchical -filter {NAME =~ *u_ff_*}]
-set_property DONT_TOUCH true [get_cells -hierarchical -filter {NAME =~ *taps_sampled_d1_reg*}]
-set_property ASYNC_REG false [get_cells -hierarchical -filter {NAME =~ *taps_sampled_d1_reg*}]
+# [수정] REF_NAME(FDC 등)이 Vivado 맘대로 변신해도 찾을 수 있게 고유 이름(NAME)으로만 검색
+set_property DONT_TOUCH true [get_cells -hierarchical -filter {NAME =~ *u_tdc*u_carry4*}]
+set_property DONT_TOUCH true [get_cells -hierarchical -filter {NAME =~ *u_tdc*CARRY_CHAIN*u_ff_*}]
+set_property ASYNC_REG true [get_cells -hierarchical -filter {NAME =~ *u_tdc*CARRY_CHAIN*u_ff_*}]
 
-set_max_delay -datapath_only -from [get_pins -hierarchical -filter {NAME =~ *u_tdc*u_carry4/O*}] -to [get_pins -hierarchical -filter {NAME =~ *u_tdc*u_ff_*/D}] 0.150
+set_property DONT_TOUCH true [get_cells -hierarchical -filter {NAME =~ *taps_sampled_d1_reg*}]
+set_property ASYNC_REG true [get_cells -hierarchical -filter {NAME =~ *taps_sampled_d1_reg*}]
+
+# [수정] 출력(O)에서 DFF의 입력(D)으로 가는 경로 강제 밀착 (0.150ns)
+set_max_delay -datapath_only -from [get_pins -hierarchical -filter {NAME =~ *u_tdc*u_carry4/O*}] -to [get_pins -hierarchical -filter {NAME =~ *u_tdc*CARRY_CHAIN*u_ff_*/D}] 0.150
+
 set_false_path -through [get_nets -hierarchical -filter {NAME =~ *carry_o*}]
 set_false_path -through [get_nets -hierarchical -filter {NAME =~ *carry_co*}]
 
@@ -39,17 +42,21 @@ set_false_path -through [get_nets -hierarchical -filter {NAME =~ *carry_co*}]
 #4. PBLOCK 설정 (파이프라인 격리)
 #=====================================================
 create_pblock pblock_pipeline
-add_cells_to_pblock [get_pblocks pblock_pipeline] [get_cells -hierarchical -filter {NAME =~ *align* || NAME =~ *snapshot* || NAME =~ *stg*}]
+# [수정] 옛날 변수명(snapshot) 지우고, 최신 5-Stage 파이프라인 변수명들로 교체
+add_cells_to_pblock [get_pblocks pblock_pipeline] [get_cells -hierarchical -filter {NAME =~ *stg* || NAME =~ *mul* || NAME =~ *_d2_reg* || NAME =~ *_d3_reg* || NAME =~ *_d4_reg* || NAME =~ *_d5_reg*}]
 resize_pblock [get_pblocks pblock_pipeline] -add {SLICE_X42Y0:SLICE_X47Y100}
 
 #=====================================================
 #5. 기타 제약 및 클럭 (ILA 포함)
 #=====================================================
 set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets -of_objects [get_ports clk_125]]
+
+# 링 오실레이터 클럭 정의
 set_disable_timing -from I -to O [get_cells -hierarchical -filter {NAME =~ *u_bufg_ro}]
 create_clock -period 5.000 -name RO_CLK [get_pins -hierarchical -filter {NAME =~ *u_bufg_ro/O}]
 set_clock_groups -asynchronous -group [get_clocks RO_CLK]
 
+# [수정] 합성 초기에 dbg_hub를 못 찾아서 에러나는 현상을 방어 (catch 구문)
 
 set_property ASYNC_REG false [get_cells -hierarchical -filter {NAME =~ *u_ff_*}]
 set_property ASYNC_REG false [get_cells -hierarchical -filter {NAME =~ *taps_sampled_d1_reg*}]
@@ -2056,4 +2063,4 @@ set_property LOC SLICE_X43Y79 [get_cells -hierarchical {*taps_sampled_d1_reg[319
 set_property C_CLK_INPUT_FREQ_HZ 300000000 [get_debug_cores dbg_hub]
 set_property C_ENABLE_CLK_DIVIDER false [get_debug_cores dbg_hub]
 set_property C_USER_SCAN_CHAIN 1 [get_debug_cores dbg_hub]
-connect_debug_port dbg_hub/clk [get_nets clk_200]
+connect_debug_port dbg_hub/clk [get_nets clk_200_fixed]

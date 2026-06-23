@@ -9,7 +9,7 @@ module tdc_test_top (
 
 // 1: MMCM Phase Shift 정밀 검증 모드 (동기식 Hit 사용)
 // 0: 링 오실레이터 Calibration 모드 (비동기 Hit 사용)
-parameter TEST_MODE_MMCM = 0; 
+parameter TEST_MODE_MMCM = 1; 
 
 wire clk_200_fixed;   
 wire clk_200_shifted; 
@@ -17,6 +17,8 @@ wire clk_locked;
 wire clk_wiz_rst = rst_n;
 
 wire psen, psincdec, psdone, ps_busy;
+
+wire [8:0] current_loop_cnt; 
 
 clk_wiz_0 u_clk (
     .clk_in1   (clk_125),
@@ -37,8 +39,10 @@ mmcm_phase_shifter u_ps_ctrl (
     .psen        (psen),
     .psincdec    (psincdec),
     .psdone      (psdone),
-    .busy        (ps_busy)
+    .busy        (ps_busy),
+    .loop_cnt    (current_loop_cnt) // ★ 새로 추가된 출력 연결
 );
+
 
 // 동기식 Hit 생성기
 reg [15:0] sync_cnt;
@@ -178,11 +182,13 @@ end
 // =====================================================
 ila_0 your_ila_instance (
     .clk    (tdc_clk),                 
-    .probe0 (ts_valid_d5),             
-    .probe1 (ts_coarse_d5),            
-    .probe2 (ts_fine_idx_d5),          
-    .probe3 (test_hit_d5),             
-    .probe4 (final_absolute_time_ps_reg) 
+    .probe0 (ts_valid_d5),               // Width: 1  (측정 완료 펄스)
+    .probe1 (ts_coarse_d5),              // Width: 32 (파이썬 분석용)
+    .probe2 (ts_fine_idx_d5),            // Width: 9  (파이썬 분석용 원시 데이터)
+    .probe3 (final_absolute_time_ps_reg),// Width: 64 (최종 계산된 물리 시간)
+    .probe4 (psdone),                    // Width: 1  (MMCM 자동 스윕 트리거용)
+    .probe5 (current_loop_cnt)           // Width: 9  (현재 스텝: 0~280)
 );
+
 
 endmodule
