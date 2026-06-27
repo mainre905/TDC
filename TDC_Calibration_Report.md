@@ -51,11 +51,13 @@ $$\phi = t_{\text{raw}} \pmod{T_{\text{clk}}}$$
 가장 정밀도가 높은 Main Segment(Segment 3)의 영역(Tap 1 ~ Tap 230)을 최우선적으로 확보합니다. 해당 세그먼트에서 소실된 나머지 외곽 영역(Tap 231 ~ Tap 292)에 한해서만 Segment 1의 데이터를 차용하는 분할 정의 기법을 적용합니다. 이 과정에서 중복 수집된 구간은 폐기됩니다.
 
 *   **수학적 모델 (Piecewise Function):**
-$$\Phi_{\text{merged}}(\text{tap}) = \begin{cases} 
+$$
+\Phi_{\text{merged}}(\text{tap}) = \begin{cases} 
 \bar{\phi}_{\text{Main}}(\text{tap}), & \text{if } \text{tap} \in \text{Main} \\ 
-\bar{\phi}_{\text{Spare}}(\text{tap}), & \text{if } \text{tap} \notin \text{Main} \text{ and } \text{tap} \in \text{Spare} \\
-\text{NaN}, & \text{otherwise}
-\end{cases}$$
+\bar{\phi}_{\text{Spare}}(\text{tap}), & \text{if } \text{tap} \notin \text{Main} \text{ and } \text{tap} \in \text{Spare} \\ 
+\text{NaN}, & \text{otherwise} 
+\end{cases}
+$$
 
 *   **실제 탭 평균화 ($\bar{\phi}$) 분석:**
     *   **Tap 1 (Main):** Loop 130, 131, 132 평균
@@ -75,7 +77,12 @@ $$\Delta \phi_i = \phi_i - \phi_{i-1}$$
 
 $$t_{\text{unwrap}}(i) = \phi_i + \text{offset}_i$$
 
-$$\text{offset}_i = \text{offset}_{i-1} + \begin{cases} 5000, & \text{if } \Delta \phi_i < -2500 \text{ ps} \\ 0, & \text{otherwise} \end{cases} \quad (\text{단, } \text{offset}_0 = 0)$$
+$$
+\text{offset}_i = \text{offset}_{i-1} + \begin{cases} 
+5000, & \text{if } \Delta \phi_i < -2500 \text{ ps} \\ 
+0, & \text{otherwise} 
+\end{cases}
+$$
 
 *   **실제 연속 구간 추적:**
     *   **Tap 155:** $\phi_{155} = 4982.14286 \text{ ps}$ (오프셋 0) $\rightarrow t_{\text{unwrap}} = \mathbf{4982.14286 \text{ ps}}$
