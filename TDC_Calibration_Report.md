@@ -37,20 +37,34 @@
 ### [Step 1] Phase Modulo: 단일 주기 평면 통일
 수집 시점의 지연 시간 차이를 배제하고 동일 선상에서 위상을 비교할 수 있도록, 모든 원본 시간 데이터 $t_{\text{raw}}$를 샘플링 클럭 주기 $T_{\text{clk}}\ (5000 \text{ ps})$로 제한하는 모듈러 연산을 가합니다.
 
-*   **수학적 모델:**
+**수학적 모델:**
+
 $$\phi = t_{\text{raw}} \pmod{T_{\text{clk}}}$$
 
-*   **실제 데이터 적용 사례:**
-    *   **Loop 130 (Tap 1):** $\phi = 2321.42857 \pmod{5000} = \mathbf{2321.42857 \text{ ps}}$
-    *   **Loop 280 (Tap 156):** $\phi = 5000.0 \pmod{5000} = \mathbf{0.0 \text{ ps}}$
-    *   **Loop 281 (Tap 157):** $\phi = 5017.85714 \pmod{5000} = \mathbf{17.85714 \text{ ps}}$
+**실제 데이터 적용 사례:**
+*   **Loop 130 (Tap 1):** $\phi = 2321.42857 \pmod{5000} = \mathbf{2321.42857 \text{ ps}}$
+*   **Loop 280 (Tap 156):** $\phi = 5000.0 \pmod{5000} = \mathbf{0.0 \text{ ps}}$
+*   **Loop 281 (Tap 157):** $\phi = 5017.85714 \pmod{5000} = \mathbf{17.85714 \text{ ps}}$
+
+**핵심 구현 파이썬 코드:**
+
+```python
+# VCO 스텝 해상도 정의 (VCO 1GHz 적용: 스텝당 약 17.857ps)
+PHASE_STEP_PS = 1000.0 / 56.0
+CLOCK_CYCLE_PS = 5000.0  # TDC 샘플링 클럭 (200MHz)
+
+# 각 데이터의 원본 지연 시간 계산 후 샘플링 클럭 주기로 모듈러 연산 적용
+grouped['raw_time_ps'] = grouped['current_loop_cnt'] * PHASE_STEP_PS
+grouped['phase_ps'] = grouped['raw_time_ps'] % CLOCK_CYCLE_PS
+```
 
 ---
 
 ### [Step 2] Priority Stitching: 중복 데이터 배제 및 유일성 확보
 가장 정밀도가 높은 Main Segment(Segment 3)의 영역(Tap 1 ~ Tap 230)을 최우선적으로 확보합니다. 해당 세그먼트에서 소실된 나머지 외곽 영역(Tap 231 ~ Tap 292)에 한해서만 Segment 1의 데이터를 차용하는 분할 정의 기법을 적용합니다. 이 과정에서 중복 수집된 구간은 폐기됩니다.
 
-*   **수학적 모델 (Piecewise Function):**
+**수학적 모델 (Piecewise Function):**
+
 $$
 \Phi_{\text{merged}}(\text{tap}) = \begin{cases} 
 \bar{\phi}_{\text{Main}}(\text{tap}), & \text{if } \text{tap} \in \text{Main} \\ 
@@ -59,20 +73,44 @@ $$
 \end{cases}
 $$
 
-*   **실제 탭 평균화 ($\bar{\phi}$) 분석:**
-    *   **Tap 1 (Main):** Loop 130, 131, 132 평균
-        $$\bar{\phi}_{\text{Tap 1}} = \frac{2321.42857 + 2339.28571 + 2357.14286}{3} = \mathbf{2339.28571 \text{ ps}}$$
-    *   **Tap 157 (Main):** Loop 281, 282 평균
-        $$\bar{\phi}_{\text{Tap 157}} = \frac{17.85714 + 35.71429}{2} = \mathbf{26.78571 \text{ ps}}$$
-    *   **Tap 292 (Patched):** Loop 127 실측값 매핑 (Tap 292는 Main에 없으므로 Segment 1에서 인입)
-        $$\bar{\phi}_{\text{Tap 292}} = \mathbf{2267.85714 \text{ ps}}$$
+**실제 탭 평균화 ($\bar{\phi}$) 분석:**
+*   **Tap 1 (Main):** Loop 130, 131, 132 평균
+    $$\bar{\phi}_{\text{Tap 1}} = \frac{2321.42857 + 2339.28571 + 2357.14286}{3} = \mathbf{2339.28571 \text{ ps}}$$
+*   **Tap 157 (Main):** Loop 281, 282 평균
+    $$\bar{\phi}_{\text{Tap 157}} = \frac{17.85714 + 35.71429}{2} = \mathbf{26.78571 \text{ ps}}$$
+*   **Tap 292 (Patched):** Loop 127 실측값 매핑 (Tap 292는 Main에 없으므로 Segment 1에서 인입)
+    $$\bar{\phi}_{\text{Tap 292}} = \mathbf{2267.85714 \text{ ps}}$$
+
+**핵심 구현 파이썬 코드:**
+
+```python
+tap_to_phase = {}
+source_map = {}
+
+# 1. Main 조각 등록 (73~277번 탭 구간 확보 - 본 실측 구조에서는 Segment 3가 Main으로 선정됨)
+main_tap_avg = main_seg.groupby('tap_idx')['phase_ps'].mean()
+for tap, phase in main_tap_avg.items():
+    tap_to_phase[tap] = phase
+    source_map[tap] = 'Main (가장 긴 직선)'
+
+# 2. Main에 존재하지 않는 빈 탭만 다른 조각(Segment 1, 2)에서 선별적으로 인입
+for seg in segments:
+    if seg is main_seg: 
+        continue
+    seg_tap_avg = seg.groupby('tap_idx')['phase_ps'].mean()
+    for tap, phase in seg_tap_avg.items():
+        if tap not in tap_to_phase:  # Main에 없을 때만 등록하여 중복 및 노이즈 차단
+            tap_to_phase[tap] = phase
+            source_map[tap] = 'Patched (가져와서 이어 붙인 탭)'
+```
 
 ---
 
 ### [Step 3] Phase Unwrapping: 연속 물리적 직선 복원
 인접 탭 간의 1차 차분 위상차 $\Delta \phi_i$를 탐색하여, 하향 돌출 경계 조건($-2500 \text{ ps}$ 미만) 발생 시 기준 오프셋을 클럭 주기($5000 \text{ ps}$) 단위로 증가시킴으로써 누적선 형태로 평탄화합니다.
 
-*   **수학적 모델:**
+**수학적 모델:**
+
 $$\Delta \phi_i = \phi_i - \phi_{i-1}$$
 
 $$t_{\text{unwrap}}(i) = \phi_i + \text{offset}_i$$
@@ -84,44 +122,81 @@ $$
 \end{cases}
 $$
 
-*   **실제 연속 구간 추적:**
-    *   **Tap 155:** $\phi_{155} = 4982.14286 \text{ ps}$ (오프셋 0) $\rightarrow t_{\text{unwrap}} = \mathbf{4982.14286 \text{ ps}}$
-    *   **Tap 156:** $\phi_{156} = 0.0 \text{ ps}$
-        $$\Delta \phi = 0.0 - 4982.14286 = -4982.14286 \text{ ps} < -2500 \text{ ps}$$
-        급격한 전이가 발생하였으므로 가산 오프셋은 $5000 \text{ ps}$로 갱신됩니다.
-        $$\rightarrow t_{\text{unwrap}} = 0.0 + 5000 = \mathbf{5000.0 \text{ ps}}$$
-    *   **Tap 157:** $\phi_{157} = 26.78571 \text{ ps}$
-        $$\rightarrow t_{\text{unwrap}} = 26.78571 + 5000 = \mathbf{5026.78571 \text{ ps}}$$
+**실제 연속 구간 추적:**
+*   **Tap 155:** $\phi_{155} = 4982.14286 \text{ ps}$ (오프셋 0) $\rightarrow t_{\text{unwrap}} = \mathbf{4982.14286 \text{ ps}}$
+*   **Tap 156:** $\phi_{156} = 0.0 \text{ ps}$
+    $$\Delta \phi = 0.0 - 4982.14286 = -4982.14286 \text{ ps} < -2500 \text{ ps}$$
+    급격한 전이가 발생하였으므로 가산 오프셋은 $5000 \text{ ps}$로 갱신됩니다.
+    $$\rightarrow t_{\text{unwrap}} = 0.0 + 5000 = \mathbf{5000.0 \text{ ps}}$$
+*   **Tap 157:** $\phi_{157} = 26.78571 \text{ ps}$
+    $$\rightarrow t_{\text{unwrap}} = 26.78571 + 5000 = \mathbf{5026.78571 \text{ ps}}$$
 
-*   **영점 수렴 정규화 (Zero-Normalization):**
-    실제 사용을 위해 기준 원점 $t_{\text{unwrap}}(1)$을 감산 연산하여 영점으로 통일합니다.
-    $$t_{\text{norm}}(i) = t_{\text{unwrap}}(i) - t_{\text{unwrap}}(1) \quad (\text{단, } t_{\text{unwrap}}(1) = 2339.28571 \text{ ps})$$
-    *   **Tap 1 정규화:** $2339.28571 - 2339.28571 = \mathbf{0.0 \text{ ps}}$
-    *   **Tap 155 정규화:** $4982.14286 - 2339.28571 = \mathbf{2642.85715 \text{ ps}}$
-    *   **Tap 156 정규화:** $5000.0 - 2339.28571 = \mathbf{2660.71429 \text{ ps}}$
-    *   **Tap 292 정규화:** $7267.85714 - 2339.28571 = \mathbf{4928.57143 \text{ ps}}$
+**영점 수렴 정규화 (Zero-Normalization):**
+실제 사용을 위해 기준 원점 $t_{\text{unwrap}}(1)$을 감산 연산하여 영점으로 통일합니다.
+$$t_{\text{norm}}(i) = t_{\text{unwrap}}(i) - t_{\text{unwrap}}(1) \quad (\text{단, } t_{\text{unwrap}}(1) = 2339.28571 \text{ ps})$$
+*   **Tap 1 정규화:** $2339.28571 - 2339.28571 = \mathbf{0.0 \text{ ps}}$
+*   **Tap 155 정규화:** $4982.14286 - 2339.28571 = \mathbf{2642.85715 \text{ ps}}$
+*   **Tap 156 정규화:** $5000.0 - 2339.28571 = \mathbf{2660.71429 \text{ ps}}$
+*   **Tap 292 정규화:** $7267.85714 - 2339.28571 = \mathbf{4928.57143 \text{ ps}}$
+
+**핵심 구현 파이썬 코드:**
+
+```python
+sorted_taps = np.array(sorted(tap_to_phase.keys()))
+phases = np.array([tap_to_phase[t] for t in sorted_taps])
+
+unwrapped_time = np.zeros_like(phases)
+unwrapped_time[0] = phases[0]
+offset = 0.0
+
+# 정렬된 탭 인덱스를 순회하며 물리적 연속 시간 좌표계로 펼침(Unwrapping)
+for i in range(1, len(phases)):
+    diff = phases[i] - phases[i-1]
+    if diff < -2500:             # 위상이 급격히 감소할 때 (주기 경계면)
+        offset += CLOCK_CYCLE_PS # 5000ps의 위상 오프셋 가산 적용
+    elif diff > 2500: 
+        offset -= CLOCK_CYCLE_PS
+    unwrapped_time[i] = phases[i] + offset
+
+# 최저 기준점(Tap 1)의 값을 0ps으로 정렬하는 영점 보정 수행
+unwrapped_time = unwrapped_time - unwrapped_time[0]
+```
 
 ---
 
 ### [Step 4] Linear Interpolation: 선형 보간 및 경계 조건 예외 처리
 정렬이 완료된 실측 데이터셋에서 발생한 중간 유실 탭(예: Tap 2 등)과 탐색 한계점 바깥의 영역(Tap 0 및 Tap 293 ~ 319)을 완성하기 위해 선형 보간법 및 경계 한계 Clamping을 실행합니다.
 
-*   **수학적 모델:**
+**수학적 모델:**
+
 $$t_{\text{interp}}(x) = y_1 + (x - x_1) \frac{y_2 - y_1}{x_2 - x_1}$$
 
-*   **경계 외삽(Extrapolation) 규칙:**
-    *   실측 최소 탭(Tap 1)의 좌측 외곽 영역은 최소 실측 정규화 시간값으로 일정하게 수렴 제어합니다.
-    *   실측 최대 탭(Tap 292)의 우측 외곽 영역은 최대 실측 정규화 시간값으로 유지 제어합니다.
+**경계 외삽(Extrapolation) 규칙:**
+*   실측 최소 탭(Tap 1)의 좌측 외곽 영역은 최소 실측 정규화 시간값으로 일정하게 수렴 제어합니다.
+*   실측 최대 탭(Tap 292)의 우측 외곽 영역은 최대 실측 정규화 시간값으로 유지 제어합니다.
+
+**핵심 구현 파이썬 코드:**
+
+```python
+# 하드웨어에서 참조할 0번부터 319번까지의 전체 탭 배열 정의
+target_taps = np.arange(320)
+
+# 실측 지연 라인 데이터를 기준으로 미측정된 빈 탭 영역을 선형 보간함
+# numpy.interp 함수는 기본 특성상 실측 범위를 넘는 외부 인덱스에 대해 
+# 최근접값 대입 방식(Clamping Extrapolation)을 엄밀히 만족함
+calibrated_abs_time = np.interp(target_taps, sorted_taps, unwrapped_time)
+```
 
 ---
 
 ### [Step 5] Hardware Quantization: 최종 LUT 생성 및 정밀 산출 검증
 하드웨어 ROM 저장소에 내장하기 위하여 복원된 연속 절대 지연 데이터에 다시 한 차례 클럭 한계 주기 모듈러($\pmod{5000}$) 연산을 적용하고, 정수형 연산 장치가 인식하도록 소수점 첫째 자리에서 반올림을 실시합니다.
 
-*   **수학적 모델:**
+**수학적 모델:**
+
 $$\text{LUT}(\text{tap}) = \text{round} \left( t_{\text{interp}}(\text{tap}) \pmod{T_{\text{clk}}} \right)$$
 
-*   **지정된 핵심 탭별 데이터 산출 연산 과정:**
+**지정된 핵심 탭별 데이터 산출 연산 과정:**
 
 #### 1) Tap 0 (최좌측 경계 외삽)
 *   보간 연산: $t_{\text{interp}}(0) = t_{\text{norm}}(1) = 0.0 \text{ ps}$
@@ -173,6 +248,21 @@ $$\text{LUT}(\text{tap}) = \text{round} \left( t_{\text{interp}}(\text{tap}) \pm
 *   보간 연산: $t_{\text{interp}}(319) = t_{\text{norm}}(292) = 4928.57143 \text{ ps}$
 *   양자화:
     $$\text{LUT}(319) = \text{round}(4928.57143 \pmod{5000}) = \mathbf{4929}$$
+
+**핵심 구현 파이썬 코드:**
+
+```python
+# 1주기 크기(CLOCK_CYCLE_PS)의 공간 내로 위상을 순환시키고 가장 가까운 정수로 이산화
+lut_phase = calibrated_abs_time % CLOCK_CYCLE_PS
+lut_integers = np.round(lut_phase).astype(int)
+
+# Vivado 등 하드웨어 ROM 이식용 .coe 캘리브레이션 형식 파일로 변환 저장
+with open("tdc_calibration_lut.coe", "w") as f:
+    f.write("memory_initialization_radix=10;\n")
+    f.write("memory_initialization_vector=\n")
+    for i, val in enumerate(lut_integers):
+        f.write(f"{val};\n" if i == len(lut_integers)-1 else f"{val},\n")
+```
 
 ---
 
