@@ -15,10 +15,10 @@
 **[초기 데이터 예시 (문제 상황)]**
 로우 데이터를 분석하면, 시간이 지남에 따라 서로 다른 주기의 탭들이 섞여 있는 것을 확인할 수 있습니다.
 *   **Main 조각 (루프 1 ~ 343):**
-    *   **Tap 73** ($17.85 \text{ ps}$) 부터 **Tap 222** ($6107.14 \text{ ps}$) 까지의 연속된 구간 (※ Main이 소유한 데이터)
+    *   **Tap 73** ($17.85 \text{ ps}$) 부터 **Tap 222** ($6107.14 \text{ ps}$) 까지의 연속된 구간 (※ Main이 소유한 1순위 기준 데이터)
 *   **Spare 조각 (루프 344 ~ 350):** 
-    *   **Tap 222** ($6142.85 \text{ ps}$) 등을 포함한 구간 (※ Spare가 소유한 구간 중 **Main과 겹침!**)
-    *   **Tap 1** ($6160.71 \text{ ps}$) 등을 포함한 구간 (※ Main에 없는 빈칸 부품)
+    *   **Tap 222** ($6142.85 \text{ ps}$) 등을 포함한 구간 (※ Spare가 소유한 구간 중 **Main과 겹치는 잉여 구간!**)
+    *   **Tap 1** ($6160.71 \text{ ps}$) 등을 포함한 구간 (※ Main에 없는 필수 빈칸 부품)
 
 ---
 
@@ -27,11 +27,17 @@
 ### [Step 1] Phase Modulo: 모든 시간대 통일 (도화지 합치기)
 어긋난 시간표를 하나로 맞추기 위해, 모든 원본 데이터에 $T_{clk}$ (5000ps)으로 나눈 나머지 모듈러(Modulo) 연산을 적용합니다. 이를 통해 수만 ps 단위의 시간들이 모두 `0 ~ 5000ps`의 단일 위상(Phase) 평면으로 강제 이동됩니다.
 
-*   **수학적 모델:**  $$\phi = t_{raw} \pmod{T_{clk}}$$
+*   **수학적 모델:**
+
+$$
+\phi = t_{raw} \pmod{T_{clk}}
+$$
+
 *   **데이터 적용:**
     *   **Main 탭 73:** $\phi_{73} = 17.85 \pmod{5000} = \mathbf{17.85 \text{ ps}}$
     *   **Spare 탭 1:** $\phi_{1} = 6160.71 \pmod{5000} = \mathbf{1160.71 \text{ ps}}$
     *   **Spare 탭 222:** $\phi_{222} = 6142.85 \pmod{5000} = \mathbf{1142.85 \text{ ps}}$
+
 *   **Python 코드:**
     ```python
     grouped['phase_ps'] = grouped['raw_time_ps'] % CLOCK_CYCLE_PS
@@ -44,18 +50,21 @@
 
 *   **수학적 모델 (Piecewise Function):**
     최종 병합된 위상 $\Phi_{merged}(tap)$은 다음을 따릅니다.
-    $$
-    \Phi_{merged}(tap) = 
-    \begin{cases} 
-    \phi_{Main}(tap), & \text{if } tap \in Main \\ 
-    \phi_{Spare}(tap), & \text{if } tap \notin Main \text{ and } tap \in Spare \\
-    \text{NULL}, & \text{otherwise (비워둠)}
-    \end{cases}
-    $$
+
+$$
+\Phi_{merged}(tap) = 
+\begin{cases} 
+\phi_{Main}(tap), & \text{if } tap \in Main \\ 
+\phi_{Spare}(tap), & \text{if } tap \notin Main \text{ and } tap \in Spare \\
+\text{NULL}, & \text{otherwise (비워둠)}
+\end{cases}
+$$
+
 *   **데이터 적용 (구간 단위 처리):**
-    1.  **Main 구간 등록(1순위):** Tap 73(`17.85ps`)부터 Tap 222(`1107.14ps`)까지 이어지는 연속된 탭 구간 데이터를 우선 확보.
-    2.  **빈 탭 구간 추가(2순위):** Main 구간에 존재하지 않는 **Tap 1**(`1160.71ps`)부터 **Tap 72**까지의 탭을 Spare 조각에서 가져와 병합.
-    3.  **겹치는 구간 폐기 로직:** Spare 조각에 포함된 **Tap 73 ~ Tap 222** 구간의 데이터(예: Tap 222, `1142.85ps`)는 이미 Main에 존재하므로 병합을 거부하고 일괄 삭제(폐기).
+    1.  **Main 구간 등록(1순위):** Tap 73(`17.85ps`)부터 Tap 222(`1107.14ps`)까지 이어지는 연속된 탭 구간 데이터를 우선 확보합니다.
+    2.  **빈 탭 구간 추가(2순위):** Main 구간에 존재하지 않는 **Tap 1**(`1160.71ps`)부터 **Tap 72**까지의 탭을 Spare 조각에서 가져와 병합합니다.
+    3.  **겹치는 구간 폐기 로직:** Spare 조각에 포함된 **Tap 73 ~ Tap 222** 구간의 데이터(예: Tap 222, `1142.85ps`)는 이미 Main에 존재하므로 병합을 거부하고 일괄 삭제(폐기)합니다.
+
 *   **Python 코드:**
     ```python
     # 1. Main 조각 등록 (73~222번 탭 구간 확보)
@@ -75,12 +84,20 @@
 병합된 데이터를 탭 번호 오름차순으로 정렬하면, 카운터 리셋 구간에서 시간이 수직 하락하는 현상(톱니바퀴)이 나타납니다. 앞뒤 탭의 위상 차이($\Delta \phi$)를 분석하여, 음수 방향으로 급락할 경우 $T_{clk}$(+5000ps)을 보상하여 꺾임 없는 하나의 직선(물리적 지연 선)으로 펼쳐냅니다.
 
 *   **수학적 모델:**
-    $$\Delta \phi_i = \phi_i - \phi_{i-1}$$
-    $$t_{unwrap}(i) = \phi_i + \sum \begin{cases} 5000, & \text{if } \Delta \phi_i < -2500 \\ 0, & \text{otherwise} \end{cases}$$
+
+$$
+\Delta \phi_i = \phi_i - \phi_{i-1}
+$$
+
+$$
+t_{unwrap}(i) = \phi_i + \sum \begin{cases} 5000, & \text{if } \Delta \phi_i < -2500 \\ 0, & \text{otherwise} \end{cases}
+$$
+
 *   **데이터 적용:**
     *   **Tap 1 :** $1160.71 \text{ ps}$ (오프셋 0)
     *   **Tap 73 :** $\Delta \phi = 17.85 - 1160.71 = -1142.86 \text{ ps}$.
         (임계값 초과! 오프셋 +5000 발생) $\rightarrow 17.85 + 5000 = \mathbf{5017.85 \text{ ps}}$
+
 *   **Python 코드:**
     ```python
     for i in range(1, len(phases)):
@@ -96,12 +113,17 @@
 Step 2에서 **NULL(비워둠)** 상태로 남겨진 데이터(예: 0번 탭, 319번 탭 등)를 채우기 위해, Step 3에서 완성된 직선을 바탕으로 선형 보간법을 수행합니다.
 
 *   **수학적 모델 (1차 직선 방정식):**
-    $$y = y_1 + \frac{(x - x_1)}{(x_2 - x_1)} \times (y_2 - y_1)$$
+
+$$
+y = y_1 + \frac{(x - x_1)}{(x_2 - x_1)} \times (y_2 - y_1)
+$$
+
 *   **데이터 적용:**
     *   **Tap 0 (유추):** 연장선에 의해 약 $\mathbf{1142 \text{ ps}}$로 추정.
     *   **Tap 1 (실측):** $1160.71 \text{ ps}$
     *   **Tap 73 (실측):** $5017.85 \text{ ps}$
     *   **Tap 319 (유추):** 연장선에 의해 약 $\mathbf{9400 \text{ ps}}$로 추정.
+
 *   **Python 코드:**
     ```python
     target_taps = np.arange(320) # 0번부터 319번까지 빈 배열 생성
@@ -114,12 +136,17 @@ Step 2에서 **NULL(비워둠)** 상태로 남겨진 데이터(예: 0번 탭, 31
 FPGA의 1주기 위상 카운터가 인식할 수 있도록, 보간이 완료된 320개의 절대 시간 배열에 다시 모듈러 연산(`% 5000`)을 적용합니다. 이후 Block RAM 형식에 맞게 가장 가까운 정수로 반올림하여 최종 `.coe` 파일을 도출합니다.
 
 *   **수학적 모델:**
-    $$LUT(tap) = \lfloor \left( t_{unwrap}(tap) \pmod{T_{clk}} \right) \rceil$$
+
+$$
+LUT(tap) = \lfloor \left( t_{unwrap}(tap) \pmod{T_{clk}} \right) \rceil
+$$
+
 *   **데이터 적용:**
     *   **Tap 0 :** $\lfloor 1142 \pmod{5000} \rceil = \lfloor 1142 \rceil = \mathbf{1142}$
     *   **Tap 1 :** $\lfloor 1160.71 \pmod{5000} \rceil = \lfloor 1160.71 \rceil = \mathbf{1161}$
     *   **Tap 73 :** $\lfloor 5017.85 \pmod{5000} \rceil = \lfloor 17.85 \rceil = \mathbf{18}$
     *   **Tap 319 :** $\lfloor 9400 \pmod{5000} \rceil = \lfloor 4400 \rceil = \mathbf{4400}$
+
 *   **Python 코드:**
     ```python
     # 1주기 모듈러 적용 후 정수로 반올림 (양자화)
