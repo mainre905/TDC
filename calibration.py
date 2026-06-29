@@ -103,10 +103,7 @@ unwrapped_time = unwrapped_time - unwrapped_time[0]
 # 5. 선형 외삽법 (Extrapolation) 및 LUT 생성
 # =========================================================================
 def extrapolate_interp(target_x, xp, yp):
-    """ 범위를 벗어나는 데이터에 대해 마지막 기울기를 연장하여 외삽 """
     y = np.interp(target_x, xp, yp)
-    
-    # 우측 외삽
     if len(xp) > 5:
         slope_right = (yp[-1] - yp[-5]) / (xp[-1] - xp[-5])
         right_mask = target_x > xp[-1]
@@ -120,9 +117,16 @@ def extrapolate_interp(target_x, xp, yp):
 target_taps = np.arange(320)
 calibrated_abs_time = extrapolate_interp(target_taps, sorted_taps, unwrapped_time)
 
-lut_phase = calibrated_abs_time % CLOCK_CYCLE_PS
-lut_integers = np.round(lut_phase).astype(int)
+# ★ 수정된 핵심 로직 ★
+# 1. Tap 0번이 음수(-32)로 내려가 있으므로, 전체 데이터를 Tap 0번 값만큼 빼서 
+#    Tap 0이 정확히 '0'에서 시작하도록 전체 그래프를 위로 영점 이동시킵니다.
+calibrated_abs_time = calibrated_abs_time - calibrated_abs_time[0]
 
+# 2. % 5000 (모듈러) 연산을 아예 제거합니다. (랩어라운드 발생 원천 차단)
+# 이렇게 하면 끝부분이 18, 40으로 꺾이지 않고 5018, 5040으로 뻗어나갑니다.
+lut_integers = np.round(calibrated_abs_time).astype(int)
+
+# coe 파일 출력
 with open("tdc_calibration_lut.coe", "w") as f:
     f.write("memory_initialization_radix=10;\n")
     f.write("memory_initialization_vector=\n")
