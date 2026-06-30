@@ -8,11 +8,14 @@ module tdc_timestamp_calc (
     input  wire [31:0]  ts_coarse,
     input  wire [8:0]   ts_fine_idx,
     input  wire         ts_valid,
-    input  wire         hit,         // 원본 코드의 test_hit 유지용
+    input  wire         hit,         
     
     // 최종 산출된 64비트 절대 시간 (단위: ps)
     output wire [63:0]  timestamp_ps,
     output wire         timestamp_valid,
+    
+    // ★ 새로 추가: 히스토그램용 보정 완료된 Sub-cycle 피코초 (0 ~ 4999 ps)
+    output wire [12:0]  calibrated_sub_cycle_ps,
     
     // 디버깅 및 하위 모듈 전달용 지연 신호
     output wire         hit_out,
@@ -46,7 +49,7 @@ module tdc_timestamp_calc (
 
     // Stage 2 (DSP 사용 명시)
     (* use_dsp = "yes" *) reg [31:0] mul_L_d2;
-    (* use_dsp = "yes" *) reg [47:0] mul_H_d2; // 상위 비트 시프트 연산을 위한 여유 공간
+    (* use_dsp = "yes" *) reg [47:0] mul_H_d2; 
     reg [12:0] calibrated_fine_ps_d2;
     reg        ts_valid_d2, hit_d2;
     reg [8:0]  ts_fine_idx_d2;
@@ -55,19 +58,22 @@ module tdc_timestamp_calc (
     // Stage 3
     reg [63:0] coarse_total_ps_d3;
     reg [12:0] calibrated_fine_ps_d3; 
+    reg [12:0] sub_cycle_ps_d3; // ★ 히스토그램용 파이프라인
     reg        ts_valid_d3, hit_d3;
     reg [8:0]  ts_fine_idx_d3;
     reg [31:0] ts_coarse_d3;
 
     // Stage 4
-    reg [32:0] sub_lower_d4;  // 최상위 비트(32번)는 Borrow(빌림) 비트
+    reg [32:0] sub_lower_d4;  
     reg [31:0] upper_half_d4; 
+    reg [12:0] sub_cycle_ps_d4; // ★ 히스토그램용 파이프라인
     reg        ts_valid_d4, hit_d4;
     reg [8:0]  ts_fine_idx_d4;
     reg [31:0] ts_coarse_d4;
 
     // Stage 5
     reg [63:0] final_absolute_time_ps_reg;
+    reg [12:0] sub_cycle_ps_d5; // ★ 히스토그램용 파이프라인
     reg        ts_valid_d5, hit_d5;
     reg [8:0]  ts_fine_idx_d5;
     reg [31:0] ts_coarse_d5;
@@ -79,9 +85,15 @@ module tdc_timestamp_calc (
         if (!rst_n) begin
             ts_coarse_L_d1 <= 0; ts_coarse_H_d1 <= 0; ts_valid_d1 <= 0; hit_d1 <= 0; ts_fine_idx_d1 <= 0;
             mul_L_d2 <= 0; mul_H_d2 <= 0; calibrated_fine_ps_d2 <= 0; ts_coarse_d2 <= 0; ts_valid_d2 <= 0; hit_d2 <= 0; ts_fine_idx_d2 <= 0;
-            coarse_total_ps_d3 <= 0; calibrated_fine_ps_d3 <= 0; ts_coarse_d3 <= 0; ts_valid_d3 <= 0; hit_d3 <= 0; ts_fine_idx_d3 <= 0;
-            sub_lower_d4 <= 0; upper_half_d4 <= 0; ts_valid_d4 <= 0; hit_d4 <= 0; ts_fine_idx_d4 <= 0; ts_coarse_d4 <= 0; 
-            final_absolute_time_ps_reg <= 0; ts_valid_d5 <= 0; hit_d5 <= 0; ts_fine_idx_d5 <= 0; ts_coarse_d5 <= 0; 
+            
+            coarse_total_ps_d3 <= 0; calibrated_fine_ps_d3 <= 0; sub_cycle_ps_d3 <= 0;
+            ts_coarse_d3 <= 0; ts_valid_d3 <= 0; hit_d3 <= 0; ts_fine_idx_d3 <= 0;
+            
+            sub_lower_d4 <= 0; upper_half_d4 <= 0; sub_cycle_ps_d4 <= 0;
+            ts_valid_d4 <= 0; hit_d4 <= 0; ts_fine_idx_d4 <= 0; ts_coarse_d4 <= 0; 
+            
+            final_absolute_time_ps_reg <= 0; sub_cycle_ps_d5 <= 0;
+            ts_valid_d5 <= 0; hit_d5 <= 0; ts_fine_idx_d5 <= 0; ts_coarse_d5 <= 0; 
         end else begin
             // ---------------------------------------------------------
             // [Stage 1] Coarse 16비트 분할 및 제어 신호 버퍼링
@@ -95,11 +107,9 @@ module tdc_timestamp_calc (
             // ---------------------------------------------------------
             // [Stage 2] DSP 곱셈 (x 5000) 및 ROM 데이터 샘플링
             // ---------------------------------------------------------
-            // 1주기(5000ps) 곱셈 수행. DSP 블록(18x25)에 완벽히 매핑됨
             mul_L_d2 <= ts_coarse_L_d1 * 16'd5000; 
             mul_H_d2 <= ts_coarse_H_d1 * 16'd5000;
             
-            // ROM Latency가 2클럭이므로, 여기서 출력되는 값을 캡처
             calibrated_fine_ps_d2 <= calibrated_fine_ps; 
             
             ts_coarse_d2   <= {ts_coarse_H_d1, ts_coarse_L_d1};
@@ -108,9 +118,12 @@ module tdc_timestamp_calc (
             ts_fine_idx_d2 <= ts_fine_idx_d1;
 
             // ---------------------------------------------------------
-            // [Stage 3] 64비트 Coarse 누적 합 병합
+            // [Stage 3] 64비트 Coarse 누적 합 병합 및 Sub-cycle 추출
             // ---------------------------------------------------------
             coarse_total_ps_d3 <= {mul_H_d2[47:0], 16'd0} + mul_L_d2;
+            
+            // ★ 보정된 피코초 산출 (히트가 발생한 시점의 0~4999 범위 절대 시간)
+            sub_cycle_ps_d3 <= 13'd5000 - calibrated_fine_ps_d2;
             
             calibrated_fine_ps_d3 <= calibrated_fine_ps_d2; 
             ts_coarse_d3          <= ts_coarse_d2;
@@ -121,9 +134,10 @@ module tdc_timestamp_calc (
             // ---------------------------------------------------------
             // [Stage 4] Borrow-Lookahead 하위 32비트 뺄셈
             // ---------------------------------------------------------
-            // {1'b0}을 추가하여 33비트로 확장 -> sub_lower_d4[32]가 Borrow Bit 역할
             sub_lower_d4  <= {1'b0, coarse_total_ps_d3[31:0]} - {20'd0, calibrated_fine_ps_d3};
             upper_half_d4 <= coarse_total_ps_d3[63:32]; 
+            
+            sub_cycle_ps_d4 <= sub_cycle_ps_d3; // ★ 파이프라인 전달
             
             ts_coarse_d4   <= ts_coarse_d3;
             ts_valid_d4    <= ts_valid_d3; 
@@ -135,6 +149,8 @@ module tdc_timestamp_calc (
             // ---------------------------------------------------------
             final_absolute_time_ps_reg <= { (upper_half_d4 - {31'd0, sub_lower_d4[32]}), sub_lower_d4[31:0] };
             
+            sub_cycle_ps_d5 <= sub_cycle_ps_d4; // ★ 파이프라인 전달 (최종 출력)
+            
             ts_coarse_d5   <= ts_coarse_d4; 
             ts_valid_d5    <= ts_valid_d4; 
             hit_d5         <= hit_d4; 
@@ -145,10 +161,10 @@ module tdc_timestamp_calc (
     // =====================================================
     // 3. 최종 출력 할당
     // =====================================================
-    assign timestamp_ps    = final_absolute_time_ps_reg;
-    assign timestamp_valid = ts_valid_d5;
+    assign timestamp_ps            = final_absolute_time_ps_reg;
+    assign timestamp_valid         = ts_valid_d5;
+    assign calibrated_sub_cycle_ps = sub_cycle_ps_d5; // 히스토그램을 위해 외부로 전달
     
-    // 하위 모듈 전달 및 ILA 디버깅용 지연 신호
     assign hit_out      = hit_d5;
     assign fine_idx_out = ts_fine_idx_d5;
     assign coarse_out   = ts_coarse_d5;

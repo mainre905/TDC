@@ -123,6 +123,8 @@ module tdc_test_top (
     // ==========================================
     wire [63:0] final_timestamp_ps;
     wire        final_ts_valid;
+
+    wire [12:0] calibrated_ps_out; // ★ 추가됨
     
     wire        aligned_hit;
     wire [8:0]  aligned_fine_idx;
@@ -138,12 +140,46 @@ module tdc_test_top (
         .hit             (test_hit),
         
         .timestamp_ps    (final_timestamp_ps),    
-        .timestamp_valid (final_ts_valid),        
+        .timestamp_valid (final_ts_valid),
+
+        .calibrated_sub_cycle_ps (calibrated_ps_out), // ★ 연결됨        
         
         .hit_out         (aligned_hit),           
         .fine_idx_out    (aligned_fine_idx),      
         .coarse_out      (aligned_coarse)         
     );
+
+
+     // ==========================================
+    // 5. 보정 후 히스토그램 수집기 (Post-Cal INL/DNL 평가)
+    // ==========================================
+    reg  [15:0] scan_div_cnt;
+    reg  [8:0]  scan_addr;
+    wire [31:0] hist_data_out;
+
+    // ILA 파형 출력용 주소 스윕 카운터
+    always @(posedge tdc_clk) begin
+        if (!clk_locked) begin
+            scan_div_cnt <= 0;
+            scan_addr    <= 0;
+        end else begin
+            scan_div_cnt <= scan_div_cnt + 1'b1;
+            if (scan_div_cnt == 16'hFFFF) begin
+                if (scan_addr == 9'd319) scan_addr <= 0;
+                else                     scan_addr <= scan_addr + 1'b1;
+            end
+        end
+    end
+
+    tdc_histogrammer u_histogrammer (
+        .clk          (tdc_clk),
+        .rst_n        (clk_locked),
+        .hit_valid    (final_ts_valid),    
+        .fine_time_ps (calibrated_ps_out), // ★ 보정된 피코초 데이터 입력
+        .read_addr    (scan_addr),
+        .read_data    (hist_data_out)
+    );
+
 
     // ==========================================
     // 5. ILA (Integrated Logic Analyzer) - 원본 복구
@@ -152,8 +188,8 @@ module tdc_test_top (
         .clk    (tdc_clk), 
         .probe0 (final_ts_valid),               // [0:0]  Trigger condition
         .probe1 (final_timestamp_ps[47:0]),     // [47:0] 절대 시간
-        .probe2 (aligned_fine_idx),             // [8:0]  보정 전 Raw 탭 번호 
-        .probe3 (aligned_coarse),               // [31:0] 보정 전 Coarse 카운터 
+        .probe2 (scan_addr),             // [8:0]  보정 전 Raw 탭 번호 
+        .probe3 (hist_data_out),               // [31:0] 보정 전 Coarse 카운터 
         .probe4 (psdone),                       // [0:0]  MMCM 상태
         .probe5 (current_loop_cnt)              // [8:0]  MMCM Loop Count
     );
