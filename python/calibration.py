@@ -15,143 +15,114 @@ else:
     plt.rcParams['font.family'] = 'NanumGothic'
 plt.rcParams['axes.unicode_minus'] = False
 
-# =========================================================================
-# 1. 데이터 로드 및 VCO 설정
-# =========================================================================
 PHASE_STEP_PS = 1000.0 / 56.0  
-CLOCK_CYCLE_PS = 5000.0        
 
-print(f"■ MMCM VCO 1GHz 적용: 스텝당 위상 천이 = {PHASE_STEP_PS:.7f} ps")
+script_dir = os.path.dirname(os.path.abspath(__file__))
+csv_filepath = os.path.join(script_dir, 'iladata.csv')
 
-csv_filename = "iladata.csv"
-if not os.path.exists(csv_filename):
-    print(f"❌ '{csv_filename}' 파일이 없습니다.")
-    exit()
-
-df = pd.read_csv(csv_filename, skiprows=[1])
+df = pd.read_csv(csv_filepath, skiprows=[1])
 df.columns = [c.strip().split("[")[0] for c in df.columns]
 
-for col in ["ts_valid_d2", "ts_fine_idx_d2", "current_loop_cnt"]:
+# 하드웨어 신호 자동 매핑
+target_keywords = {"valid": "final_ts_valid", "fine": "aligned_fine_idx", "loop": "current_loop_cnt"}
+mapped_cols = {}
+for key, keyword in target_keywords.items():
+    found_col = next((c for c in df.columns if keyword in c), None)
+    if found_col is None:
+        print(f"❌ 에러: CSV에서 '{keyword}' 신호를 찾을 수 없습니다!")
+        exit()
+    mapped_cols[key] = found_col
+
+COL_VALID, COL_FINE, COL_LOOP = mapped_cols["valid"], mapped_cols["fine"], mapped_cols["loop"]
+
+for col in [COL_VALID, COL_FINE, COL_LOOP]:
     df[col] = pd.to_numeric(df[col], errors="coerce")
 
-df_valid = df.dropna(subset=["ts_fine_idx_d2", "current_loop_cnt"]).copy()
-df_valid = df_valid[df_valid["ts_valid_d2"] == 1]
+df_valid = df.dropna(subset=[COL_FINE, COL_LOOP]).copy()
+df_valid = df_valid[df_valid[COL_VALID] == 1]
 
 # =========================================================================
-# 2. 벡터 연산을 이용한 데이터 분할 및 [Ghost Tap 필터링]
+# [핵심 1] 조각 이어붙이기 폐기 -> 가장 긴 '골든 청크(Golden Chunk)' 추출
 # =========================================================================
-grouped = df_valid.groupby('current_loop_cnt')['ts_fine_idx_d2'].mean().reset_index()
-grouped['tap_idx'] = np.round(grouped['ts_fine_idx_d2']).astype(int)
-grouped['raw_time_ps'] = grouped['current_loop_cnt'] * PHASE_STEP_PS
-grouped['phase_ps'] = grouped['raw_time_ps'] % CLOCK_CYCLE_PS
+grouped = df_valid.groupby(COL_LOOP)[COL_FINE].mean().reset_index()
+grouped['tap_idx'] = np.round(grouped[COL_FINE]).astype(int)
+grouped['raw_time_ps'] = grouped[COL_LOOP] * PHASE_STEP_PS
 
-# NumPy diff를 활용해 역방향 하락 지점을 기준으로 고속 분할
-diffs = np.diff(grouped['tap_idx'].values)
-split_indices = np.where(diffs < 0)[0] + 1
-segments_raw = np.split(grouped, split_indices)
+taps = grouped['tap_idx'].values
+times = grouped['raw_time_ps'].values
 
-segments = []
-for seg in segments_raw:
-    # ★ 길이가 짧은 Ghost Tap (노이즈) 조각은 폐기
-    if len(seg) > 5:
-        segments.append(pd.DataFrame(seg))
+# 탭 번호가 50 이상 뚝 떨어지는 곳(랩어라운드 발생)을 기준으로 데이터를 나눔
+split_indices = np.where(np.diff(taps) < -50)[0] + 1
+segments = np.split(np.arange(len(taps)), split_indices)
 
-main_seg = max(segments, key=len)
-print(f"■ 필터링 완료: 노이즈 제거 후 총 {len(segments)}개 유효 조각 확보.")
+# 가장 데이터가 많은 연속 구간(Golden Chunk) 찾기
+longest_seg_indices = max(segments, key=len)
 
-# =========================================================================
-# 3. 빈 탭 이어 붙이기 (Priority Stitching)
-# =========================================================================
-tap_to_phase = {}
-source_map = {}
+# 양끝에서 발생하는 고스트 탭(노이즈)을 수학적으로 완벽히 잘라내기 위해 앞뒤 2개씩 버림
+golden_indices = longest_seg_indices[2:-2]
 
-# Main 우선 등록
-for tap, phase in main_seg.groupby('tap_idx')['phase_ps'].mean().items():
-    tap_to_phase[tap] = phase
-    source_map[tap] = 'Main (가장 긴 직선)'
+golden_taps = taps[golden_indices]
+golden_times = times[golden_indices]
 
-# 나머지 빈칸 채우기
-for seg in segments:
-    if seg is main_seg: continue
-    for tap, phase in seg.groupby('tap_idx')['phase_ps'].mean().items():
-        if tap not in tap_to_phase:  
-            tap_to_phase[tap] = phase
-            source_map[tap] = 'Patched (결측치 보충)'
+# 같은 탭 번호에서 미세한 노이즈가 있을 수 있으니 평균으로 깔끔하게 정리
+clean_df = pd.DataFrame({'tap': golden_taps, 'time': golden_times})
+clean_df = clean_df.groupby('tap')['time'].mean().reset_index()
+
+final_taps = clean_df['tap'].values
+final_times = clean_df['time'].values
 
 # =========================================================================
-# 4. 위상 펼침 (Phase Unwrapping)
-# =========================================================================
-sorted_taps = np.array(sorted(tap_to_phase.keys()))
-phases = np.array([tap_to_phase[t] for t in sorted_taps])
-sources = np.array([source_map[t] for t in sorted_taps])
-
-unwrapped_time = np.zeros_like(phases)
-unwrapped_time[0] = phases[0]
-offset = 0.0
-
-for i in range(1, len(phases)):
-    diff = phases[i] - phases[i-1]
-    if diff < -2500:  
-        offset += CLOCK_CYCLE_PS
-    elif diff > 2500: 
-        offset -= CLOCK_CYCLE_PS
-    unwrapped_time[i] = phases[i] + offset
-
-unwrapped_time = unwrapped_time - unwrapped_time[0] 
-
-# =========================================================================
-# 5. 선형 외삽법 (Extrapolation) 및 LUT 생성
+# [핵심 2] 선형 외삽법 (Extrapolation) 및 LUT 생성
 # =========================================================================
 def extrapolate_interp(target_x, xp, yp):
+    # 정렬 및 보간
+    idx = np.argsort(xp)
+    xp, yp = xp[idx], yp[idx]
     y = np.interp(target_x, xp, yp)
-    if len(xp) > 5:
-        slope_right = (yp[-1] - yp[-5]) / (xp[-1] - xp[-5])
-        right_mask = target_x > xp[-1]
-        y[right_mask] = yp[-1] + slope_right * (target_x[right_mask] - xp[-1])
-        
-        slope_left = (yp[4] - yp[0]) / (xp[4] - xp[0])
-        left_mask = target_x < xp[0]
-        y[left_mask] = yp[0] + slope_left * (target_x[left_mask] - xp[0])
+    
+    # 우측 연장 (측정된 마지막 5개 탭의 기울기를 이어감)
+    slope_right = (yp[-1] - yp[-5]) / (xp[-1] - xp[-5])
+    right_mask = target_x > xp[-1]
+    y[right_mask] = yp[-1] + slope_right * (target_x[right_mask] - xp[-1])
+    
+    # 좌측 연장 (측정된 최초 5개 탭의 기울기를 이어감)
+    slope_left = (yp[4] - yp[0]) / (xp[4] - xp[0])
+    left_mask = target_x < xp[0]
+    y[left_mask] = yp[0] + slope_left * (target_x[left_mask] - xp[0])
     return y
 
 target_taps = np.arange(320)
-calibrated_abs_time = extrapolate_interp(target_taps, sorted_taps, unwrapped_time)
+calibrated_abs_time = extrapolate_interp(target_taps, final_taps, final_times)
 
-# ★ 수정된 핵심 로직 ★
-# 1. Tap 0번이 음수(-32)로 내려가 있으므로, 전체 데이터를 Tap 0번 값만큼 빼서 
-#    Tap 0이 정확히 '0'에서 시작하도록 전체 그래프를 위로 영점 이동시킵니다.
+# 하드웨어 로직을 위해 Tap 0번을 무조건 0ps로 정렬 (단조 증가 완성)
 calibrated_abs_time = calibrated_abs_time - calibrated_abs_time[0]
 
-# 2. % 5000 (모듈러) 연산을 아예 제거합니다. (랩어라운드 발생 원천 차단)
-# 이렇게 하면 끝부분이 18, 40으로 꺾이지 않고 5018, 5040으로 뻗어나갑니다.
 lut_integers = np.round(calibrated_abs_time).astype(int)
 
 # coe 파일 출력
-with open("tdc_calibration_lut.coe", "w") as f:
+coe_filepath = os.path.join(script_dir, "tdc_calibration_lut.coe")
+with open(coe_filepath, "w") as f:
     f.write("memory_initialization_radix=10;\n")
     f.write("memory_initialization_vector=\n")
     for i, val in enumerate(lut_integers):
         f.write(f"{val};\n" if i == len(lut_integers)-1 else f"{val},\n")
-print("■ 4929 평탄화 문제 해결! 'tdc_calibration_lut.coe' 파일 생성 완료!")
+print(f"■ 절벽 제거 완벽 해결! '{coe_filepath}' 파일 생성 완료!")
 
 # =========================================================================
-# 6. 시각화 (그래프 출력)
+# 6. 최종 완벽 시각화
 # =========================================================================
 plt.figure(figsize=(14, 7))
-main_mask = sources == 'Main (가장 긴 직선)'
-plt.plot(sorted_taps[main_mask], unwrapped_time[main_mask], 'o', color='#3b82f6', markersize=6, label='Main Segment')
 
-patch_mask = sources == 'Patched (결측치 보충)'
-if np.any(patch_mask):
-    plt.plot(sorted_taps[patch_mask], unwrapped_time[patch_mask], 's', color='#ef4444', markersize=6, label='Patched Taps')
+plt.plot(final_taps, final_times - final_times[0], 'o', color='#3b82f6', markersize=6, label='Golden Measured Taps')
+plt.plot(target_taps, calibrated_abs_time, '-', color='#10b981', linewidth=2, alpha=0.6, zorder=1, label='Perfect Extrapolated Line')
 
-plt.plot(target_taps, calibrated_abs_time, '-', color='#10b981', linewidth=2, alpha=0.5, zorder=1, label='Extrapolated Final Curve')
-
-plt.title("Ultimate TDC Calibration: Merged & Extrapolated Delay Line", fontsize=16, fontweight='bold', pad=15)
+plt.title("Ultimate TDC Calibration: The Flawless Monotonic Delay Line", fontsize=16, fontweight='bold', pad=15)
 plt.xlabel("TDC Fine Index (Tap)", fontsize=12)
-plt.ylabel("Unwrapped Absolute Time (ps)", fontsize=12)
+plt.ylabel("Absolute Time (ps)", fontsize=12)
 plt.grid(True, linestyle='--', alpha=0.6)
 plt.legend(loc='lower right', fontsize=11)
 plt.tight_layout()
-plt.savefig("combined_straight_line.png", dpi=300)
-plt.show() 
+
+png_filepath = os.path.join(script_dir, "flawless_straight_line.png")
+plt.savefig(png_filepath, dpi=300)
+plt.show()

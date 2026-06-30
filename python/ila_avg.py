@@ -5,16 +5,17 @@ import os
 # ============================================================
 # 0. 파일 확인
 # ============================================================
-csv_filename = "iladata.csv"
+# 1. 현재 실행 중인 파이썬 스크립트 파일(.py)이 있는 폴더의 절대 경로를 가져옵니다.
+script_dir = os.path.dirname(os.path.abspath(__file__))
 
-if not os.path.exists(csv_filename):
-    print(f"❌ '{csv_filename}' 파일이 없습니다.")
-    exit()
+# 2. 그 폴더 경로와 'iladata.csv' 파일 이름을 합쳐서 정확한 전체 경로를 만듭니다.
+csv_filepath = os.path.join(script_dir, 'iladata.csv')
+
 
 # ============================================================
 # 1. 데이터 로드
 # ============================================================
-df = pd.read_csv(csv_filename, skiprows=[1])
+df = pd.read_csv(csv_filepath, skiprows=[1])
 
 # 컬럼 이름 정리
 df.columns = [c.strip().split("[")[0] for c in df.columns]

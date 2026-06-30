@@ -1,9 +1,18 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
+import os
+
+
+# 1. 현재 실행 중인 파이썬 스크립트 파일(.py)이 있는 폴더의 절대 경로를 가져옵니다.
+script_dir = os.path.dirname(os.path.abspath(__file__))
+
+# 2. 그 폴더 경로와 'iladata.csv' 파일 이름을 합쳐서 정확한 전체 경로를 만듭니다.
+csv_filepath = os.path.join(script_dir, 'iladata.csv')
+
 
 # 1. ILA에서 Export한 CSV 파일 로드
-df = pd.read_csv('iladata.csv', skiprows=[1])
+df = pd.read_csv(csv_filepath, skiprows=[1])
 df.columns = [c.strip().split("[")[0] for c in df.columns]
 
 df['current_loop_cnt'] = pd.to_numeric(df['current_loop_cnt'], errors='coerce')
