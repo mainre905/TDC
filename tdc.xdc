@@ -16,6 +16,28 @@ set_property PACKAGE_PIN G14 [get_ports {led[2]}]
 set_property PACKAGE_PIN D18 [get_ports {led[3]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {led[*]}]
 
+
+# ==============================================================
+# 모드 선택 스위치 (SW0, SW1)
+# ==============================================================
+# sw_mode[0] : SW0
+set_property PACKAGE_PIN G15 [get_ports {sw_mode[0]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {sw_mode[0]}]
+
+# sw_mode[1] : SW1
+set_property PACKAGE_PIN P15 [get_ports {sw_mode[1]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {sw_mode[1]}]
+
+# ==============================================================
+# STM32 외부 Hit Input (PMOD JB - Pin 1 / T20 사용 예시)
+# ==============================================================
+set_property PACKAGE_PIN T20 [get_ports ext_hit_in]
+set_property IOSTANDARD LVCMOS33 [get_ports ext_hit_in]
+
+# 외부 비동기 핀에서 들어오는 신호의 타이밍 에러(Setup/Hold violation) 무시
+set_false_path -from [get_ports ext_hit_in]
+
+
 #=====================================================
 #2. RING OSCILLATOR (조합 루프 허용)
 #=====================================================
