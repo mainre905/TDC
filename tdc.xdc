@@ -18,17 +18,6 @@ set_property IOSTANDARD LVCMOS33 [get_ports {led[*]}]
 
 
 # ==============================================================
-# 모드 선택 스위치 (SW0, SW1)
-# ==============================================================
-# sw_mode[0] : SW0
-set_property PACKAGE_PIN G15 [get_ports {sw_mode[0]}]
-set_property IOSTANDARD LVCMOS33 [get_ports {sw_mode[0]}]
-
-# sw_mode[1] : SW1
-set_property PACKAGE_PIN P15 [get_ports {sw_mode[1]}]
-set_property IOSTANDARD LVCMOS33 [get_ports {sw_mode[1]}]
-
-# ==============================================================
 # STM32 외부 Hit Input (PMOD JB - Pin 1 / T20 사용 예시)
 # ==============================================================
 set_property PACKAGE_PIN T20 [get_ports ext_hit_in]
