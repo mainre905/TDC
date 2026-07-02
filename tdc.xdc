@@ -17,10 +17,16 @@ set_property PACKAGE_PIN D18 [get_ports {led[3]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {led[*]}]
 
 
+# 클럭 MUX로 인한 Inter-Clock False Path 설정 (Logically Exclusive)
+set_clock_groups -logically_exclusive \
+    -group [get_clocks -of_objects [get_pins u_clk/inst/mmcm_adv_inst/CLKOUT0]] \
+    -group [get_clocks -of_objects [get_pins u_clk/inst/mmcm_adv_inst/CLKOUT1]]
+
+
 # ==============================================================
 # STM32 외부 Hit Input (PMOD JB - Pin 1 / T20 사용 예시)
 # ==============================================================
-set_property PACKAGE_PIN T20 [get_ports ext_hit_in]
+set_property PACKAGE_PIN V8 [get_ports ext_hit_in]
 set_property IOSTANDARD LVCMOS33 [get_ports ext_hit_in]
 
 # 외부 비동기 핀에서 들어오는 신호의 타이밍 에러(Setup/Hold violation) 무시

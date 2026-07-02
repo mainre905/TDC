@@ -3,108 +3,112 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-def analyze_tdc_intervals(csv_file_path):
-    print(f"[{csv_file_path}] \n위 경로의 파일 분석을 시작합니다...\n")
+def analyze_and_correct_tdc(csv_file_path):
+    print(f"[{csv_file_path}] \n데이터 분석 및 Metastability 순차적 보정을 시작합니다...\n")
     
-    # 1. CSV 데이터 로드
     try:
         df = pd.read_csv(csv_file_path)
     except FileNotFoundError:
         print("❌ 에러: CSV 파일을 찾을 수 없습니다.")
-        print("이 파이썬 스크립트(.py)와 동일한 폴더에 CSV 파일이 있는지 확인해주세요.")
         return
 
-    # 2. Vivado ILA 특유의 쓰레기 데이터(Radix 행) 필터링
+    # ILA 쓰레기 행 필터링
     if df.iloc[0].astype(str).str.contains('Radix|Unsigned|Hex', na=False, case=False).any():
         df = df.iloc[1:].reset_index(drop=True)
 
-    # 3. 절대 시간(Timestamp) 컬럼 자동 탐색
-    time_col = None
+    time_col, fine_col = None, None
     for col in df.columns:
-        if 'timestamp' in col.lower() or 'probe2' in col.lower():
-            time_col = col
-            break
+        col_lower = col.lower()
+        if 'timestamp' in col_lower or 'probe2' in col_lower: time_col = col
+        elif 'fine' in col_lower or 'probe3' in col_lower: fine_col = col
 
-    if time_col is None:
-        print("❌ 에러: CSV 파일에서 Timestamp 컬럼을 찾을 수 없습니다.")
-        return
-
-    # 4. 데이터 전처리 (Unsigned Int 정수형으로 변환)
     df[time_col] = pd.to_numeric(df[time_col], errors='coerce')
-    df = df.dropna(subset=[time_col]).copy() 
+    if fine_col: df[fine_col] = pd.to_numeric(df[fine_col], errors='coerce')
+    df = df.dropna(subset=[time_col]).copy()
+    df.reset_index(drop=True, inplace=True)
+
+    # Numpy 배열로 변환 (순차적 계산을 위해)
+    times = df[time_col].values.astype(float)
+    fines = df[fine_col].values if fine_col else np.zeros(len(times))
+
+    # 원본 간격 및 오버플로우 처리
+    orig_intervals = np.diff(times)
+    MAX_48BIT = 2**48
+    orig_intervals[orig_intervals < 0] += MAX_48BIT
+
+    # 기대되는 정상 간격 추정 (Median Filter)
+    expected_intervals = pd.Series(orig_intervals).rolling(window=7, center=True, min_periods=1).median().values
+
+    # ★ 핵심: 순차적 보정을 위한 배열
+    corrected_times = times.copy()
+    correction_count = 0
 
     # =========================================================
-    # ★ 핵심 로직 1: 펄스 간 간격(Interval = 주기 T) 계산
+    # ★ 순차적 에러 보정 루프 (에러 밀림 현상 방지)
     # =========================================================
-    df['interval_ps'] = df[time_col].diff()
-    df = df.dropna(subset=['interval_ps']).copy()
+    for i in range(1, len(times)):
+        # ★ 이전 펄스가 고쳐졌다면, 그 '고쳐진 시간'을 기준으로 현재 간격을 다시 잼
+        current_interval = corrected_times[i] - corrected_times[i-1]
+        
+        if current_interval < 0:
+            current_interval += MAX_48BIT
 
-    # Wrap-around(오버플로우) 보상
-    wrap_condition = df['interval_ps'] < 0
-    if wrap_condition.any():
-        MAX_48BIT = 2**48
-        df.loc[wrap_condition, 'interval_ps'] += MAX_48BIT
+        error = current_interval - expected_intervals[i-1]
 
-    df['interval_us'] = df['interval_ps'] / 1_000_000.0
+        # 조건 1: -5ns 점프 (Coarse가 덜 카운트됨 -> 5ns 추가)
+        if error < -3000 and fines[i] > 200:
+            corrected_times[i] += 5000
+            correction_count += 1
+            
+        # 조건 2: +5ns 점프 (Coarse가 더 카운트됨 -> 5ns 감소)
+        elif error > 3000 and fines[i] < 50:
+            corrected_times[i] -= 5000
+            correction_count += 1
+
+    # 최종 결과 정리
+    final_intervals = np.diff(corrected_times)
+    final_intervals[final_intervals < 0] += MAX_48BIT
+
+    orig_us = orig_intervals / 1_000_000.0
+    corr_us = final_intervals / 1_000_000.0
+
+    print(f"총 측정된 펄스 수 : {len(times)} 개")
+    print(f"발견 및 보정된 에러: {correction_count} 건\n")
 
     # =========================================================
-    # ★ 핵심 로직 2: 주파수(Frequency = 1/T) 계산
+    # 시각화 (위: 보정 전, 아래: 보정 후)
     # =========================================================
-    df['frequency_kHz'] = (1.0 / df['interval_us']) * 1000.0
+    # X축 절대 시간 계산
+    abs_time_ms_orig = np.cumsum(np.insert(orig_us, 0, 0))[:-1] / 1000.0
+    abs_time_ms_corr = np.cumsum(np.insert(corr_us, 0, 0))[:-1] / 1000.0
 
-    # 통계 분석 결과 출력
-    mean_us = df['interval_us'].mean()
-    print("=====================================================")
-    print("                 📊 측정 통계 결과                   ")
-    print("=====================================================")
-    print(f"총 측정된 펄스 수 : {len(df)} 개")
-    print(f"평균 펄스 간격    : {mean_us:.4f} us")
-    print(f"최소 주파수       : {df['frequency_kHz'].min():.2f} kHz")
-    print(f"최대 주파수       : {df['frequency_kHz'].max():.2f} kHz")
-    print("=====================================================\n")
-
-    # =========================================================
-    # ★ 7. Chirp 신호 시각화 (X축을 절대 시간으로 변경!) ★
-    # =========================================================
-    # 각 펄스 간격(us)을 누적해서 더하면, 측정 시작점부터 흘러간 절대 시간(us)이 됩니다.
-    df['absolute_time_us'] = df['interval_us'].cumsum()
-
-    # 보기 편하게 밀리초(ms) 단위로 변경
-    df['absolute_time_ms'] = df['absolute_time_us'] / 1000.0
-
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 9), sharex=True)
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
     
-    # [위쪽 그래프] Time Interval (주기)
-    # X축을 np.arange(len(df)) 대신 df['absolute_time_ms'] 로 변경!
-    ax1.plot(df['absolute_time_ms'].values, df['interval_us'].values, 
-             marker='.', linestyle='-', color='b', markersize=3, alpha=0.7)
-    ax1.set_title("STM32 Chirp Signal Analysis (Absolute Time Domain)", fontsize=16)
-    ax1.set_ylabel(r"Time Interval ($\mu s$)", fontsize=12, fontweight='bold', color='b')
+    # [위쪽 그래프] 보정 전 (Before)
+    ax1.plot(abs_time_ms_orig, orig_us, marker='.', linestyle='-', color='red', markersize=4, alpha=0.8)
+    ax1.set_title("Before Correction (Original TDC Data)", fontsize=16, fontweight='bold')
+    ax1.set_ylabel(r"Time Interval ($\mu s$)", fontsize=12, fontweight='bold')
     ax1.grid(True, linestyle='--', alpha=0.6)
     
-    # [아래쪽 그래프] Frequency (주파수)
-    # X축을 df['absolute_time_ms'] 로 변경!
-    ax2.plot(df['absolute_time_ms'].values, df['frequency_kHz'].values, 
-             marker='.', linestyle='-', color='r', markersize=3, alpha=0.7)
-    ax2.set_ylabel("Frequency (kHz)", fontsize=12, fontweight='bold', color='r')
-    ax2.set_xlabel("Absolute Time (ms)", fontsize=12, fontweight='bold') # X축 라벨 변경
+    # [아래쪽 그래프] 보정 후 (After)
+    ax2.plot(abs_time_ms_corr, corr_us, marker='.', linestyle='-', color='blue', markersize=4, alpha=0.8)
+    ax2.set_title("After Correction (Metastability Fixed)", fontsize=16, fontweight='bold')
+    ax2.set_ylabel(r"Time Interval ($\mu s$)", fontsize=12, fontweight='bold')
+    ax2.set_xlabel("Absolute Time (ms)", fontsize=12, fontweight='bold')
     ax2.grid(True, linestyle='--', alpha=0.6)
     
+    # Y축 스케일을 동일하게 맞춰서 시각적 차이를 극대화함
+    y_min = min(orig_us.min(), corr_us.min()) - 0.005
+    y_max = max(orig_us.max(), corr_us.max()) + 0.005
+    ax1.set_ylim(y_min, y_max)
+    ax2.set_ylim(y_min, y_max)
+
     plt.tight_layout()
-    print("그래프 창을 닫으면 프로그램이 종료됩니다.")
     plt.show()
 
-# =================================================================
-# 프로그램 실행부
-# =================================================================
 if __name__ == "__main__":
-    # ★ 핵심 수정: 현재 파이썬 스크립트(.py)가 위치한 절대 경로를 가져옵니다.
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    # 찾고자 하는 CSV 파일 이름
-    target_filename = "chirp.csv"  # 추출하신 csv 파일 이름으로 변경하세요.
-    
-    # 스크립트 폴더 경로와 파일 이름을 합쳐서 최종 절대 경로 생성
+    target_filename = "line.csv"  # 👈 분석할 CSV 파일 이름
     absolute_file_path = os.path.join(script_dir, target_filename)
     
-    analyze_tdc_intervals(absolute_file_path)
+    analyze_and_correct_tdc(absolute_file_path)
