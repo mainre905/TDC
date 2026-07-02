@@ -20,16 +20,15 @@ localparam NUM_TAPS = CARRY4_STAGES * 4; // 320
 (* keep = "true" *) wire [NUM_TAPS-1:0] carry_co;
 (* keep = "true", dont_touch = "true" *) wire [NUM_TAPS-1:0] carry_o; 
 
-// taps_sampled는 Primitive로 직접 박으므로 wire로 선언
 (* ASYNC_REG = "TRUE", DONT_TOUCH = "TRUE" *) wire [NUM_TAPS-1:0] taps_sampled;
 
 // -------------------------------------------------------------------------
-// 2. 파이프라인용 내부 레지스터 (최적화 완료)
+// 2. 파이프라인용 내부 레지스터
 // -------------------------------------------------------------------------
 reg [31:0] global_timer;
 reg [31:0] global_timer_d1;
 
-(* DONT_TOUCH = "TRUE" *) reg [NUM_TAPS-1:0] taps_sampled_d1; // 원본 격리용 (Fanout = 1)
+(* DONT_TOUCH = "TRUE" *) reg [NUM_TAPS-1:0] taps_sampled_d1; // 원본 격리용
 reg taps_sampled_0_history; // 엣지 감지용 단 1비트 과거 저장소
 
 reg snapshot_valid_stg2, snapshot_valid_stg3, snapshot_valid_stg4;
@@ -78,9 +77,6 @@ generate
             );
         end
         
-        // ★ [궁극의 해결책] 
-        // 1. BEL 속성 제거 (XDC 제약이 알아서 해줌)
-        // 2. FDCE 대신 FDC 사용 (CE 핀 삭제로 더미 게이트 생성 원천 차단)
         (* DONT_TOUCH = "TRUE" *) FDC u_ff_0 ( .Q(taps_sampled[(k*4)+0]), .C(clk), .CLR(rst_high), .D(carry_o[(k*4)+0]) );								   
         (* DONT_TOUCH = "TRUE" *) FDC u_ff_1 ( .Q(taps_sampled[(k*4)+1]), .C(clk), .CLR(rst_high), .D(carry_o[(k*4)+1]) );									   
         (* DONT_TOUCH = "TRUE" *) FDC u_ff_2 ( .Q(taps_sampled[(k*4)+2]), .C(clk), .CLR(rst_high), .D(carry_o[(k*4)+2]) );		
@@ -89,14 +85,23 @@ generate
 endgenerate
 
 // -------------------------------------------------------------------------
-// 4. MAIN LOGIC (파이프라인 연산)
+// 4. MAIN LOGIC (파이프라인 연산 및 범용 데드타임 로직)
 // -------------------------------------------------------------------------
+// ★ 범용 측정을 위한 최소 데드타임 (원하는 최대 주파수에 맞춰 조절 가능)
+// 1 = 5ns 무시 (최대 200MHz 측정 가능)
+// 2 = 10ns 무시 (최대 100MHz 측정 가능)
+localparam DEAD_TIME_CYCLES = 2; 
+
+reg [3:0] dead_time_cnt; 
+
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
         global_timer <= 0;
         global_timer_d1 <= 0;
         taps_sampled_d1 <= 0;
         taps_sampled_0_history <= 0;
+        
+        dead_time_cnt <= 0; // 데드타임 초기화
         
         snapshot_valid_stg2 <= 0;
         snapshot_valid_stg3 <= 0; 
@@ -110,22 +115,30 @@ always @(posedge clk or negedge rst_n) begin
         end
     end 
     else begin
-        // [Stage 1] 원본 보호용 이송 및 타이머 동기화 (배선 지연 해결)
+        // [Stage 1] 
         global_timer <= global_timer + 1'b1;
         global_timer_d1 <= global_timer;
         
         taps_sampled_d1 <= taps_sampled;
-        taps_sampled_0_history <= taps_sampled_d1[0]; // 엣지 판별용 1비트 
+        taps_sampled_0_history <= taps_sampled_d1[0]; 
 
-        // [Stage 2] 엣지 감지 및 즉시 Popcount 연산
-        if (taps_sampled_d1[0] && !taps_sampled_0_history) begin
+        // [Stage 2] 엣지 감지 및 최소 데드타임 적용
+        if (dead_time_cnt > 0) begin
+            dead_time_cnt <= dead_time_cnt - 1'b1;
+            snapshot_valid_stg2 <= 1'b0;
+        end
+        else if (taps_sampled_d1[0] && !taps_sampled_0_history) begin
+            // 진짜 엣지 감지 시 지정된 찰나의 시간(예: 10ns) 동안만 글리치 무시
+            dead_time_cnt <= DEAD_TIME_CYCLES; 
+            
             for (i = 0; i < 20; i = i + 1) begin
                 stg1_halfA[i] <= popcount8(taps_sampled_d1[i*16 +: 8]);
                 stg1_halfB[i] <= popcount8(taps_sampled_d1[i*16+8 +: 8]);
             end
             coarse_d2 <= global_timer_d1 - 1'b1;
             snapshot_valid_stg2 <= 1'b1;
-        end else begin
+        end 
+        else begin
             snapshot_valid_stg2 <= 1'b0;
         end
 
@@ -138,7 +151,7 @@ always @(posedge clk or negedge rst_n) begin
             snapshot_valid_stg3 <= 1'b0;
         end
 
-        // [Stage 4] 최종 4그룹 병합 및 출력
+        // [Stage 4] 병합 및 출력
         if (snapshot_valid_stg3) begin
             stg3_group0 <= stg2_sum[0]  + stg2_sum[1]  + stg2_sum[2]  + stg2_sum[3]  + stg2_sum[4];
             stg3_group1 <= stg2_sum[5]  + stg2_sum[6]  + stg2_sum[7]  + stg2_sum[8]  + stg2_sum[9];

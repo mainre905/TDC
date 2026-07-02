@@ -1,11 +1,18 @@
 `timescale 1ns / 1ps
 
-module tdc_test_top (
+module tdc_test_top #(
+    // ==========================================================
+    // ★★★ 여기 숫자만 바꿔서 원하는 모드로 재합성하세요 ★★★
+    // 0 : Hit = Ring Osc(랜덤)   | Clock = Fixed 200MHz  (기본 동작 테스트용)
+    // 1 : Hit = Test Sync(내부)  | Clock = Shifted 200MHz (MMCM 캘리브레이션용)
+    // 2 : Hit = 외부 STM32 신호  | Clock = Fixed 200MHz  (실제 측정용)
+    // ==========================================================
+    parameter integer OPERATION_MODE = 2
+)(
     input  wire       clk_125, 
     input  wire       rst_n, 
     input  wire       btn_shift, 
-    input  wire       ext_hit_in,  // ZYBO PMOD 외부 입력
-    input  wire [1:0] sw_mode,     // [추가] 2-Bit 스위치 모드 선택 (SW1, SW0)
+    input  wire       ext_hit_in,  // ZYBO Hi-Speed PMOD (JB1 - V8)
     output wire [3:0] led
 );
 
@@ -39,7 +46,7 @@ module tdc_test_top (
         .loop_cnt    (current_loop_cnt)
     );
 
-    // [Mode 1용] Calibration Test Hit Sync (약 250us 주기)
+    // [Mode 1용] Calibration Test Hit Sync
     reg [15:0] sync_cnt; 
     reg test_hit_sync;
     always @(posedge clk_200_fixed) begin 
@@ -76,33 +83,30 @@ module tdc_test_top (
 
     wire hit_random = ro_divider_cnt[5]; 
 
-    // ==========================================
-    // 3. ★ 핵심: 3-Way Mode MUXing 로직 ★
-    // ==========================================
-    // 0 (2'b00) : Hit = hit_random     | Clock = Fixed 200MHz
-    // 1 (2'b01) : Hit = test_hit_sync  | Clock = Shift 200MHz
-    // 2 (2'b10) : Hit = ext_hit_in     | Clock = Fixed 200MHz
+    // ==========================================================
+    // 3. ★★★ 하드코딩된 모드 선택 로직 (Generate 문 사용) ★★★
+    // ==========================================================
+    // Verilog의 파라미터 값을 기준으로 컴파일 시점에 아예 회로를 다르게 생성합니다.
+    // 스위치나 MUX가 존재하지 않으므로 클럭 글리치나 순간적인 오작동이 원천 차단됩니다.
     
-    reg tdc_hit_in;
-    always @(*) begin
-        case (sw_mode)
-            2'b00:   tdc_hit_in = hit_random;     // 모드 0: 순수 RO 테스트
-            2'b01:   tdc_hit_in = test_hit_sync;  // 모드 1: MMCM LUT 추출용 스윕
-            2'b10:   tdc_hit_in = ext_hit_in;     // 모드 2: STM32 외부 측정 모드
-            default: tdc_hit_in = hit_random;     // Fallback
-        endcase
-    end
-
-    // Xilinx Glitch-Free Clock MUX 사용 (sw_mode가 2'b01일 때만 1, 나머진 0)
+    wire tdc_hit_in;
     wire tdc_clk;
-    wire clk_sel = (sw_mode == 2'b01) ? 1'b1 : 1'b0; 
 
-    BUFGMUX u_tdc_clk_mux (
-        .O  (tdc_clk),
-        .I0 (clk_200_fixed),    // clk_sel = 0 일 때
-        .I1 (clk_200_shifted),  // clk_sel = 1 일 때
-        .S  (clk_sel)
-    );
+    generate
+        if (OPERATION_MODE == 0) begin : MODE_0_RO_TEST
+            assign tdc_hit_in = hit_random;
+            assign tdc_clk    = clk_200_fixed;
+        end
+        else if (OPERATION_MODE == 1) begin : MODE_1_MMCM_SWEEP
+            assign tdc_hit_in = test_hit_sync;
+            assign tdc_clk    = clk_200_shifted;
+        end
+        else begin : MODE_2_EXT_STM32 // OPERATION_MODE == 2
+            assign tdc_hit_in = ext_hit_in;
+            assign tdc_clk    = clk_200_fixed;
+        end
+    endgenerate
+
 
     // ==========================================
     // 4. TDC Core & 절대 시간 변환기
@@ -140,46 +144,21 @@ module tdc_test_top (
         .coarse_out      (aligned_coarse)         
     );
 
-    // ==========================================
-    // 5. 펄스 간 시간 간격(Interval) 계산
-    // ==========================================
-    reg [63:0] prev_timestamp_ps;
-    reg [63:0] pulse_interval_ps;
-    reg        interval_valid;
-
-    always @(posedge tdc_clk) begin
-        if (!clk_locked) begin
-            prev_timestamp_ps <= 0;
-            pulse_interval_ps <= 0;
-            interval_valid    <= 0;
-        end else begin
-            if (final_ts_valid) begin
-                prev_timestamp_ps <= final_timestamp_ps;
-                pulse_interval_ps <= final_timestamp_ps - prev_timestamp_ps;
-                interval_valid    <= 1'b1;
-            end else begin
-                interval_valid    <= 1'b0;
-            end
-        end
-    end
-
-    // LED 모니터링: [0]=락, [1]=Sweep상태, [3:2]=현재 스위치 모드
     assign led[0] = clk_locked; 
     assign led[1] = ps_busy; 
-    assign led[3:2] = sw_mode; 
+    assign led[2] = tdc_hit_in;    // 현재 TDC로 들어가는 Hit 신호 상태를 실시간으로 보여줌 (매우 유용)
+    assign led[3] = final_ts_valid; // Hit가 계산 완료될 때마다 깜빡임
 
     // ==========================================
-    // 6. ILA (Integrated Logic Analyzer)
+    // 5. ILA (Integrated Logic Analyzer)
     // ==========================================
-    // ★ 주의: ILA IP 설정 시 probe5의 Width를 2로 수정해야 합니다!
     ila_0 your_ila_instance (
         .clk    (tdc_clk), 
-        .probe0 (final_ts_valid),               // [0:0]  트리거 조건
-        .probe1 (tdc_hit_in),                   // [0:0]  현재 MUX된 Hit 신호
-        .probe2 (final_timestamp_ps[47:0]),     // [47:0] 절대 시간 (ps)
-        .probe3 (pulse_interval_ps[47:0]),      // [47:0] ★펄스 간 간격(Interval, ps)
-        .probe4 (aligned_fine_idx),             // [8:0]  보정 전 Raw 탭 번호 
-        .probe5 (sw_mode)                       // [1:0]  ★현재 선택된 모드
+        .probe0 (final_ts_valid),               // [0:0]  트리거 조건 (Data Valid)
+        .probe1 (tdc_hit_in),                   // [0:0]  현재 Hit 신호 (여기서 직접 STM32 파형 확인 가능)
+        .probe2 (final_timestamp_ps[47:0]),     // [47:0] 절대 시간 (ps 단위)
+        .probe3 (aligned_fine_idx),             // [8:0]  보정 전 Raw 탭 번호 
+        .probe4 (raw_ts_coarse)                 // [31:0] Coarse 카운터 상태 확인용 (디버깅에 도움)
     );
 
 endmodule
