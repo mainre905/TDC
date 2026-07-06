@@ -2,17 +2,17 @@
 
 module tdc_test_top #(
     // ==========================================================
-    // ★★★ 여기 숫자만 바꿔서 원하는 모드로 재합성하세요 ★★★
-    // 0 : Hit = Ring Osc(랜덤)   | Clock = Fixed 200MHz  (기본 동작 테스트용)
-    // 1 : Hit = Test Sync(내부)  | Clock = Shifted 200MHz (MMCM 캘리브레이션용)
+    // ★★★ 동작 모드 정의 (사용자 피드백 반영) ★★★
+    // 0 : Hit = Test Sync(내부)  | Clock = Shifted 200MHz (MMCM 캘리브레이션용)
+    // 1 : Hit = Ring Osc(랜덤)   | Clock = Fixed 200MHz  (기본 동작 및 탭 누적 테스트용)
     // 2 : Hit = 외부 STM32 신호  | Clock = Fixed 200MHz  (실제 측정용)
     // ==========================================================
-    parameter integer OPERATION_MODE = 2
+    parameter integer OPERATION_MODE = 1
 )(
     input  wire       clk_125, 
     input  wire       rst_n, 
-    input  wire       btn_shift, 
-    input  wire       ext_hit_in,  // ZYBO Hi-Speed PMOD (JB1 - V8)
+    input  wire       btn_shift,   // 물리 버튼 (ILA Sweep Trigger 및 MMCM Shift 공용)
+    input  wire       ext_hit_in,  // ZYBO PMOD JB1 (V8 Pin)
     output wire [3:0] led
 );
 
@@ -46,7 +46,7 @@ module tdc_test_top #(
         .loop_cnt    (current_loop_cnt)
     );
 
-    // [Mode 1용] Calibration Test Hit Sync
+    // [Mode 0용] Calibration Test Hit Sync
     reg [15:0] sync_cnt; 
     reg test_hit_sync;
     always @(posedge clk_200_fixed) begin 
@@ -62,7 +62,7 @@ module tdc_test_top #(
     end
 
     // ==========================================
-    // 2. Ring Oscillator (Mode 0용)
+    // 2. Ring Oscillator (Mode 1용)
     // ==========================================
     (* KEEP = "TRUE", DONT_TOUCH = "TRUE" *) reg ro_enable_reg = 1'b0;
     always @(posedge clk_125) ro_enable_reg <= clk_locked;
@@ -83,30 +83,26 @@ module tdc_test_top #(
 
     wire hit_random = ro_divider_cnt[5]; 
 
-    // ==========================================================
-    // 3. ★★★ 하드코딩된 모드 선택 로직 (Generate 문 사용) ★★★
-    // ==========================================================
-    // Verilog의 파라미터 값을 기준으로 컴파일 시점에 아예 회로를 다르게 생성합니다.
-    // 스위치나 MUX가 존재하지 않으므로 클럭 글리치나 순간적인 오작동이 원천 차단됩니다.
-    
+    // ==========================================
+    // 3. 하드코딩된 모드 선택 제너레이터
+    // ==========================================
     wire tdc_hit_in;
     wire tdc_clk;
 
     generate
-        if (OPERATION_MODE == 0) begin : MODE_0_RO_TEST
-            assign tdc_hit_in = hit_random;
-            assign tdc_clk    = clk_200_fixed;
-        end
-        else if (OPERATION_MODE == 1) begin : MODE_1_MMCM_SWEEP
+        if (OPERATION_MODE == 0) begin : MODE_0_MMCM_SWEEP
             assign tdc_hit_in = test_hit_sync;
             assign tdc_clk    = clk_200_shifted;
         end
-        else begin : MODE_2_EXT_STM32 // OPERATION_MODE == 2
+        else if (OPERATION_MODE == 1) begin : MODE_1_RO_TEST       // Mode 1 = Ring Osc 연결
+            assign tdc_hit_in = hit_random;
+            assign tdc_clk    = clk_200_fixed;
+        end
+        else begin : MODE_2_EXT_STM32                             // Mode 2 = 외부 STM32 연결
             assign tdc_hit_in = ext_hit_in;
             assign tdc_clk    = clk_200_fixed;
         end
     endgenerate
-
 
     // ==========================================
     // 4. TDC Core & 절대 시간 변환기
@@ -144,21 +140,75 @@ module tdc_test_top #(
         .coarse_out      (aligned_coarse)         
     );
 
-    assign led[0] = clk_locked; 
-    assign led[1] = ps_busy; 
-    assign led[2] = tdc_hit_in;    // 현재 TDC로 들어가는 Hit 신호 상태를 실시간으로 보여줌 (매우 유용)
-    assign led[3] = final_ts_valid; // Hit가 계산 완료될 때마다 깜빡임
+    // ==========================================================
+    // 5. 버튼 디바운싱 및 온칩 ILA 리드아웃 스캐너
+    // ==========================================================
+    reg btn_shift_d1, btn_shift_d2;
+    always @(posedge tdc_clk) begin
+        btn_shift_d1 <= btn_shift;
+        btn_shift_d2 <= btn_shift_d1;
+    end
+    wire btn_trigger_sweep = (btn_shift_d1 && !btn_shift_d2);
 
-    // ==========================================
-    // 5. ILA (Integrated Logic Analyzer)
-    // ==========================================
+    reg        readout_active;
+    reg [8:0]  sweep_addr;
+    reg [8:0]  probe_read_addr; 
+
+    always @(posedge tdc_clk or negedge clk_locked) begin
+        if (!clk_locked) begin
+            readout_active  <= 1'b0;
+            sweep_addr      <= 9'd0;
+            probe_read_addr <= 9'd0;
+        end else begin
+            if (btn_trigger_sweep && !readout_active) begin
+                readout_active <= 1'b1;
+                sweep_addr     <= 9'd0;
+            end else if (readout_active) begin
+                if (sweep_addr == 9'd319) begin
+                    readout_active <= 1'b0;
+                end else begin
+                    sweep_addr <= sweep_addr + 1'b1;
+                end
+            end
+            // BRAM Read Latency (1 clk) 보정
+            probe_read_addr <= sweep_addr;
+        end
+    end
+
+    // ==========================================================
+    // 6. 히스토그램 모듈 인스턴스
+    // ==========================================================
+    wire [31:0] histo_read_data;
+
+    tdc_histogram #(
+        .ADDR_WIDTH(9),
+        .DATA_WIDTH(32)
+    ) u_histo (
+        .clk         (tdc_clk),
+        .rst_n       (clk_locked),
+        .ts_fine_idx (aligned_fine_idx),
+        .ts_valid    (final_ts_valid),
+        .read_addr   (sweep_addr),
+        .read_data   (histo_read_data)
+    );
+
+    // 외부 보드 상태 LED 맵핑
+    assign led[0] = clk_locked; 
+    assign led[1] = readout_active; // 리드아웃 스위핑 동작 시 점등
+    assign led[2] = tdc_hit_in;    
+    assign led[3] = final_ts_valid; 
+
+    // ==========================================================
+    // 7. ILA (Integrated Logic Analyzer) 갱신
+    // ==========================================================
+    // 트리거 신호와 리드아웃 정보를 수집하도록 변경
     ila_0 your_ila_instance (
         .clk    (tdc_clk), 
-        .probe0 (final_ts_valid),               // [0:0]  트리거 조건 (Data Valid)
-        .probe1 (tdc_hit_in),                   // [0:0]  현재 Hit 신호 (여기서 직접 STM32 파형 확인 가능)
-        .probe2 (final_timestamp_ps[47:0]),     // [47:0] 절대 시간 (ps 단위)
-        .probe3 (aligned_fine_idx),             // [8:0]  보정 전 Raw 탭 번호 
-        .probe4 (raw_ts_coarse)                 // [31:0] Coarse 카운터 상태 확인용 (디버깅에 도움)
+        .probe0 (readout_active),   // [0:0]  ILA 트리거 소스 (0 -> 1 상승에지 트리거)
+        .probe1 (probe_read_addr),  // [8:0]  출력 중인 지연선 탭 번호 (0 ~ 319)
+        .probe2 (histo_read_data),  // [31:0] 해당 탭의 누적 통계 카운트 데이터
+        .probe3 (tdc_hit_in),       // [0:0]  Ring Oscillator 파형 유입 여부 모니터링
+        .probe4 (final_ts_valid)    // [0:0]  TDC 모듈 출력 플래그
     );
 
 endmodule

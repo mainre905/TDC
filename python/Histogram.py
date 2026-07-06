@@ -1,133 +1,178 @@
+import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import os
 
-# ==========================================
-# 1. 파일 설정 및 데이터 로드
-# ==========================================
-report_filename = 'tdc_analysis_report.txt'
+# =========================================================================
+# 0. Vivado 표기법(예: 32'h000000FF, 32'd511)을 정수형(int)으로 변환하는 함수
+# =========================================================================
+def clean_vivado_value(val):
+    if pd.isna(val):
+        return 0
+    
+    val_str = str(val).strip().lower()
+    
+    if "'" in val_str:
+        parts = val_str.split("'")
+        if len(parts) == 2:
+            r_val = parts[1]
+            if r_val.startswith('h'): # 16진수
+                return int(r_val[1:], 16)
+            elif r_val.startswith('d'): # 10진수
+                return int(r_val[1:], 10)
+            elif r_val.startswith('b'): # 2진수
+                return int(r_val[1:], 2)
+            elif r_val.startswith('o'): # 8진수
+                return int(r_val[1:], 8)
+            else:
+                try:
+                    return int(r_val, 10)
+                except ValueError:
+                    pass
 
+    if val_str.startswith('0x'):
+        return int(val_str, 16)
+        
+    if val_str.startswith('h'):
+        try:
+            return int(val_str[1:], 16)
+        except ValueError:
+            pass
 
-# 1. 현재 실행 중인 파이썬 스크립트 파일(.py)이 있는 폴더의 절대 경로를 가져옵니다.
-script_dir = os.path.dirname(os.path.abspath(__file__))
+    try:
+        return int(val_str, 10)
+    except ValueError:
+        pass
 
-# 2. 그 폴더 경로와 'iladata.csv' 파일 이름을 합쳐서 정확한 전체 경로를 만듭니다.
-csv_filepath = os.path.join(script_dir, 'iladata_ring.csv')
+    try:
+        return int(float(val_str))
+    except ValueError:
+        return 0
 
-print("CSV 데이터를 불러오고 분석하는 중...")
-# 첫 번째 데이터 행(인덱스 1, Radix 정보) 제외하고 로드
-df = pd.read_csv(csv_filepath, skiprows=[1])
-df.columns = df.columns.str.strip()
+# =========================================================================
+# 1. 경로 설정 및 데이터 로드 (현재 .py 파일이 있는 폴더 기준)
+# =========================================================================
+# 현재 실행 중인 스크립트 파일(.py)의 절대 경로 폴더를 획득합니다.
+current_dir = os.path.dirname(os.path.abspath(__file__))
 
-# 열 이름 식별
-valid_col = [col for col in df.columns if 'final_ts_valid' in col][0]
-fine_idx_col = [col for col in df.columns if 'aligned_fine_idx' in col][0]
-ts_col = [col for col in df.columns if 'final_timestamp_ps' in col][0]
+# 동일 폴더 내에 위치한 CSV 파일 경로 매핑
+csv_filename = "histo.csv" 
+csv_file_path = os.path.join(current_dir, csv_filename)
 
-# ==========================================
-# 2. 데이터 처리 및 필터링
-# ==========================================
-# Valid == 1 인 유효 데이터만 추출
-df[valid_col] = pd.to_numeric(df[valid_col], errors='coerce')
-valid_hits = df[df[valid_col] == 1].copy()
+CLOCK_PERIOD_PS = 5000.0  # 200MHz
 
-total_samples = len(df)
-valid_count = len(valid_hits)
-
-if valid_count == 0:
-    print("유효한(Valid=1) 데이터가 없습니다.")
+try:
+    df = pd.read_csv(csv_file_path, comment='#')
+    print(f"[Info] 성공적으로 데이터를 불러왔습니다. 경로: {csv_file_path}")
+except FileNotFoundError:
+    print(f"[Error] 파일을 찾을 수 없습니다. 경로를 확인하십시오: {csv_file_path}")
     exit()
 
-# 보정 전(Raw) 데이터: 0 ~ 320 탭 번호
-raw_data = valid_hits[fine_idx_col].values
+# 열 이름 부분 일치 검색
+try:
+    addr_col = [col for col in df.columns if 'probe_read_addr' in col][0]
+    data_col = [col for col in df.columns if 'histo_read_data' in col][0]
+except IndexError:
+    print("[Error] CSV 파일 내에 'probe_read_addr' 또는 'histo_read_data' 열을 식별할 수 없습니다.")
+    print("현재 열 목록:", list(df.columns))
+    exit()
 
-# 보정 후(Calibrated) 데이터: 최종 절대 시간을 5ns(5000ps)로 나눈 나머지 위상 시간
-# 결과값 범위: 0 ~ 4999 ps
-valid_hits['calibrated_fine_ps'] = valid_hits[ts_col] % 5000
-calib_data = valid_hits['calibrated_fine_ps'].values
+# =========================================================================
+# 2. 데이터 클렌징 및 정렬
+# =========================================================================
+df[addr_col] = df[addr_col].apply(clean_vivado_value)
+df[data_col] = df[data_col].apply(clean_vivado_value)
 
-# ==========================================
-# 3. 통계 계산 (균일도 분석)
-# ==========================================
-# 보정 전 히스토그램 연산 (321개 구간)
-raw_hist, _ = np.histogram(raw_data, bins=321, range=(0, 321))
-raw_mean = np.mean(raw_hist)
-raw_std = np.std(raw_hist)
+# 주소 정렬 및 중복 제거
+df_sorted = df.sort_values(by=addr_col).drop_duplicates(subset=[addr_col])
 
-# 보정 후 히스토그램 연산 (100개 구간, 구간당 50ps)
-calib_hist, _ = np.histogram(calib_data, bins=100, range=(0, 5000))
-calib_mean = np.mean(calib_hist)
-calib_std = np.std(calib_hist)
+raw_taps = df_sorted[addr_col].values
+raw_counts = df_sorted[data_col].values
 
-# 상대 표준편차 (CV = 편차/평균) - 값이 작을수록 평평(Uniform)함을 의미
-raw_cv = (raw_std / raw_mean) * 100 if raw_mean != 0 else 0
-calib_cv = (calib_std / calib_mean) * 100 if calib_mean != 0 else 0
+# =========================================================================
+# 3. 유효 지연선 영역 검출 (Active Region Detection)
+# =========================================================================
+MIN_COUNT_THRESHOLD = 20  
+active_indices = np.where(raw_counts > MIN_COUNT_THRESHOLD)[0]
 
-# ==========================================
-# 4. 분석 결과 TXT 파일로 출력
-# ==========================================
-with open(report_filename, 'w', encoding='utf-8') as f:
-    f.write("========================================================\n")
-    f.write("             TDC 캘리브레이션 분석 리포트               \n")
-    f.write("========================================================\n\n")
-    
-    f.write("[1. 데이터 추출 요약]\n")
-    f.write(f"- 전체 캡처된 샘플 수 : {total_samples:,} 개\n")
-    f.write(f"- 유효한 Hit (Valid=1): {valid_count:,} 개\n\n")
-    
-    f.write("[2. 보정 전 (Raw Fine Index) 통계]\n")
-    f.write("  * 링 오실레이터가 탭을 때린 날것의 횟수 (예상: 삐쭉삐쭉함)\n")
-    f.write(f"  - 평균 Hit 수 (Bin당)   : {raw_mean:.1f}\n")
-    f.write(f"  - 최대 Hit 수 (제일 넓은 탭): {np.max(raw_hist)}\n")
-    f.write(f"  - 최소 Hit 수 (제일 좁은 탭): {np.min(raw_hist)}\n")
-    f.write(f"  - 편차(Standard Dev)    : {raw_std:.1f} (평균 대비 {raw_cv:.1f}% 요동침)\n\n")
+if len(active_indices) == 0:
+    print("[Error] 임계값 이상 축적된 카운트 데이터가 없습니다. 측정 환경을 확인하십시오.")
+    exit()
 
-    f.write("[3. 보정 후 (MMCM ROM 적용 후 위상 시간) 통계]\n")
-    f.write("  * 최종 절대 시간을 5ns 단위로 잘랐을 때의 분포 (예상: 평평함)\n")
-    f.write(f"  - 평균 Hit 수 (Bin당)   : {calib_mean:.1f}\n")
-    f.write(f"  - 최대 Hit 수           : {np.max(calib_hist)}\n")
-    f.write(f"  - 최소 Hit 수           : {np.min(calib_hist)}\n")
-    f.write(f"  - 편차(Standard Dev)    : {calib_std:.1f} (평균 대비 {calib_cv:.1f}% 요동침)\n\n")
+start_tap = active_indices[0]
+end_tap = active_indices[-1]
 
-    f.write("[4. 결론 및 해석]\n")
-    if calib_cv < raw_cv:
-        f.write(f"  => MMCM 캘리브레이션 적용 후 데이터의 요동침이 {raw_cv:.1f}%에서 {calib_cv:.1f}%로 감소했습니다.\n")
-        f.write("  => 캘리브레이션(ROM)이 정상적으로 작동하여 선형성(Linearity)이 개선되었습니다.\n\n")
-    else:
-        f.write("  => 경고: 캘리브레이션 후 데이터가 더 불균일합니다. ROM 데이터를 확인하세요.\n\n")
+taps = raw_taps[start_tap:end_tap+1]
+counts = raw_counts[start_tap:end_tap+1]
 
-    f.write("[5. 상위 10개 유효 데이터 샘플 (ps 단위)]\n")
-    f.write("   Hit_Seq | Timestamp (ps) | Raw Index | Calibrated Phase (0~4999ps)\n")
-    f.write("   ------------------------------------------------------------------\n")
-    
-    sample_df = valid_hits[[ts_col, fine_idx_col, 'calibrated_fine_ps']].head(10)
-    for i, (_, row) in enumerate(sample_df.iterrows()):
-        f.write(f"      {i:02d}   | {int(row[ts_col]):14d} | {int(row[fine_idx_col]):9d} | {int(row['calibrated_fine_ps']):7d} \n")
+print(f"=== TDC 유효 지연선 검출 결과 ===")
+print(f"전체 가용 구간: Tap {raw_taps[0]} ~ Tap {raw_taps[-1]}")
+print(f"실제 동작 구간: Tap {start_tap} ~ Tap {end_tap} (총 {len(taps)}개 탭 활성화)")
 
-print(f"\n분석이 완료되었습니다. 결과가 '{report_filename}'에 저장되었습니다.")
+# =========================================================================
+# 4. DNL / INL 및 시간 캘리브레이션 연산
+# =========================================================================
+avg_count = np.mean(counts)
 
-# ==========================================
-# 5. 데이터 시각화 (그래프 출력)
-# ==========================================
-plt.style.use('default')
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+# DNL (LSB)
+dnl = (counts / avg_count) - 1.0
 
-# 보정 전 그래프
-ax1.hist(raw_data, bins=321, range=(0, 321), color='royalblue', edgecolor='black', alpha=0.7)
-ax1.set_title(f'Raw Tap Index Distribution (Before Calibration) - CV: {raw_cv:.1f}%', fontsize=13)
-ax1.set_xlabel('Raw Tap Index (0 ~ 320)', fontsize=11)
-ax1.set_ylabel('Hit Count', fontsize=11)
-ax1.grid(axis='y', linestyle='--', alpha=0.7)
+# INL (LSB)
+inl = np.cumsum(dnl)
 
-# 보정 후 그래프
-ax2.hist(calib_data, bins=100, range=(0, 5000), color='seagreen', edgecolor='black', alpha=0.7)
-ax2.set_title(f'Calibrated Time Distribution in 5ns (After MMCM ROM) - CV: {calib_cv:.1f}%', fontsize=13)
-ax2.set_xlabel('Time within 1 Clock Cycle (0 ~ 4999 ps)', fontsize=11)
-ax2.set_ylabel('Hit Count', fontsize=11)
-ax2.grid(axis='y', linestyle='--', alpha=0.7)
+# 실제 지연 시간 변환 (ps)
+total_counts = np.sum(counts)
+tap_widths_ps = (counts / total_counts) * CLOCK_PERIOD_PS
+calibrated_time_ps = np.cumsum(tap_widths_ps)
+
+# =========================================================================
+# 5. 시각화 (Matplotlib Subplots)
+# =========================================================================
+fig, axs = plt.subplots(2, 2, figsize=(14, 10))
+fig.suptitle("TDC Linearity & Calibration Analysis (Ring Osc Mode)", fontsize=16, fontweight='bold')
+
+# [Graph 1] Raw Tap Histogram
+axs[0, 0].bar(raw_taps, raw_counts, color='gray', alpha=0.5, label='Inactive Taps')
+axs[0, 0].bar(taps, counts, color='blue', alpha=0.8, label='Active Taps')
+axs[0, 0].axhline(y=avg_count, color='red', linestyle='--', label=f'Avg Count ({avg_count:.1f})')
+axs[0, 0].set_title("1. Raw Tap Histogram")
+axs[0, 0].set_xlabel("Tap Index")
+axs[0, 0].set_ylabel("Accumulated Hits")
+axs[0, 0].legend()
+axs[0, 0].grid(True, linestyle=':', alpha=0.6)
+
+# [Graph 2] DNL Plot
+axs[0, 1].step(taps, dnl, where='mid', color='darkorange', linewidth=1.5)
+axs[0, 1].axhline(y=0, color='black', linestyle='-', linewidth=0.8)
+axs[0, 1].set_title("2. Differential Non-Linearity (DNL)")
+axs[0, 1].set_xlabel("Tap Index")
+axs[0, 1].set_ylabel("DNL (LSB)")
+axs[0, 1].grid(True, linestyle=':', alpha=0.6)
+
+# [Graph 3] INL Plot
+axs[1, 0].plot(taps, inl, color='crimson', linewidth=1.8)
+axs[1, 0].axhline(y=0, color='black', linestyle='-', linewidth=0.8)
+axs[1, 0].set_title("3. Integral Non-Linearity (INL)")
+axs[1, 0].set_xlabel("Tap Index")
+axs[1, 0].set_ylabel("INL (LSB)")
+axs[1, 0].grid(True, linestyle=':', alpha=0.6)
+
+# [Graph 4] Calibrated Time (Lookup Table Curve)
+axs[1, 1].plot(taps, calibrated_time_ps, color='teal', linewidth=2, label="Calibrated Time Curve")
+ideal_line = np.linspace(0, CLOCK_PERIOD_PS, len(taps))
+axs[1, 1].plot(taps, ideal_line, color='purple', linestyle=':', label="Ideal Linear Line")
+axs[1, 1].set_title("4. Calibrated Time LUT (Transfer Function)")
+axs[1, 1].set_xlabel("Tap Index")
+axs[1, 1].set_ylabel("Absolute Delay (ps)")
+axs[1, 1].legend()
+axs[1, 1].grid(True, linestyle=':', alpha=0.6)
 
 plt.tight_layout()
-# 그래프 이미지를 파일로도 저장
-plt.savefig('tdc_calibration_result.png', dpi=150)
+
+print(f"\n=== 성능 분석 요약 ===")
+print(f"Max DNL : {np.max(dnl):.3f} LSB  |  Min DNL : {np.min(dnl):.3f} LSB")
+print(f"Max INL : {np.max(inl):.3f} LSB  |  Min INL : {np.min(inl):.3f} LSB")
+print(f"평균 단일 탭 지연 해상도(Resolution) : {CLOCK_PERIOD_PS / len(taps):.2f} ps")
+print(f"===================================")
+
 plt.show()
