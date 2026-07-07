@@ -1,159 +1,111 @@
-# -*- coding: utf-8 -*-
-"""
-TDC_Calibration_Report.md 파일을 자동 생성하는 파이썬 스크립트
-(새로운 고스트 탭 필터링 및 선형 외삽법 알고리즘 반영 버전 - SyntaxError 픽스)
-"""
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
 
-# 수식과 파이썬 소스코드가 중첩되어 문자열이 중간에 잘리는 것을 방지하기 위해 
-# 백틱 기호(```) 대신 임시 식별자 [TRIPLE_BACKTICKS]를 사용하여 문자열을 기술한 뒤, 
-# 파일 저장 직전에 실제 백틱 기호로 치환 처리합니다.
-report_content = r"""# TDC Calibration 및 LUT 생성을 위한 데이터 처리 알고리즘 종합 분석 보고서
+# ==========================================
+# 1. 파일 설정 및 데이터 로드
+# ==========================================
+csv_file = "histo.csv"
 
-## 1. 개요 (Overview)
-본 보고서는 FPGA 내부의 **TDC(Time-to-Digital Converter)** 회로 측정 데이터를 분석하여 하드웨어 캘리브레이션에 사용될 **LUT(Look-Up Table, .coe 파일)**를 신뢰성 있게 도출하는 5단계 알고리즘 프로세스를 기술합니다.
+try:
+    df = pd.read_csv(csv_file, skiprows=[1])
+    df.columns = df.columns.str.strip()
+except FileNotFoundError:
+    print(f"Error: '{csv_file}' 파일을 찾을 수 없습니다.")
+    exit()
 
-수집된 디지털 시간 정보(Raw Data)는 하드웨어 카운터의 구조적 한계와 랩어라운드(Wrap-around) 특성으로 인해 불연속적인 분절 형태로 기록됩니다. 이를 해결하기 위해 본 알고리즘은 **1) 시간대 통일(Modulo), 2) 노이즈 필터링 및 병합(Ghost Tap Filtering & Stitching), 3) 위상 펼침(Unwrapping), 4) 선형 보간 및 외삽(Interpolation & Extrapolation), 5) 하드웨어 양자화(Quantization)**를 거쳐 왜곡 없는 절대 지연선을 설계하는 수학적 기초를 제공합니다.
+col_readout = 'readout_active'
+col_addr    = 'probe_read_addr[8:0]'
+col_data    = 'histo_read_data[31:0]'
 
----
+# 데이터 필터링 (0~319 탭 추출)
+df_active = df[df[col_readout].astype(str).str.contains('1')]
+df_clean = df_active.drop_duplicates(subset=[col_addr]).sort_values(by=col_addr)
+df_plot = df_clean[(df_clean[col_addr] >= 0) & (df_clean[col_addr] < 320)].copy()
 
-## 2. 시스템 파라미터 및 원본 데이터 세그먼트 분석
-### 2.1 주요 시스템 변수 정의
-*   **TDC 샘플링 클럭 주기 ($T_{\text{clk}}$):** $5000.0 \text{ ps}$ (200 MHz)
-*   **MMCM VCO 동작 주파수:** $1.0 \text{ GHz}$ (1주기 = $1000.0 \text{ ps}$)
-*   **위상 이동 최소 해상도 ($\Delta t_{\text{step}}$):** 
-    $$\Delta t_{\text{step}} = \frac{1000.0 \text{ ps}}{56} \approx 17.857142857 \text{ ps}$$
+tap_index = df_plot[col_addr].astype(int).values
+hit_counts = df_plot[col_data].astype(float).values
 
----
+if len(tap_index) == 0:
+    print("Error: 추출된 데이터가 없습니다. CSV 파일 포맷을 확인하세요.")
+    exit()
 
-## 3. 알고리즘 5단계 상세 프로세스 및 수식 검증
+# ==========================================
+# 2. 유효 구간(Active Region) 자동 필터링
+# ==========================================
+# 최대 Hit Count의 10% 이상인 탭들만 '유효한 측정 탭'으로 간주합니다.
+# 이렇게 하면 항상 0인 Tap 0과 끝부분 절벽 구간이 자동으로 제외됩니다.
+threshold = np.max(hit_counts) * 0.1
+valid_mask = hit_counts > threshold
+valid_indices = np.where(valid_mask)[0]
 
-### [Step 1] Phase Modulo: 단일 주기 평면 통일
-수집 시점의 지연 시간 차이를 배제하고 동일 선상에서 위상을 비교할 수 있도록, 모든 원본 시간 데이터 $t_{\text{raw}}$를 샘플링 클럭 주기 $T_{\text{clk}}\ (5000 \text{ ps})$로 제한하는 모듈러 연산을 가합니다.
+# 유효 구간의 시작과 끝 탭 번호 획득
+first_valid = valid_indices[0]
+last_valid = valid_indices[-1]
 
-**수학적 모델:**
+# 통계 계산용 배열 분리
+tap_index_active = tap_index[first_valid:last_valid+1]
+hit_counts_active = hit_counts[first_valid:last_valid+1]
 
-$$\phi = t_{\text{raw}} \pmod{T_{\text{clk}}}$$
+# ==========================================
+# 3. 통계 및 DNL 계산 (유효 구간 내에서만)
+# ==========================================
+mean_count = np.mean(hit_counts_active)
 
-**핵심 구현 파이썬 코드:**
+# 실제 활성화된 탭들만 가지고 DNL 계산
+dnl_active = (hit_counts_active - mean_count) / mean_count
 
-[TRIPLE_BACKTICKS]python
-# VCO 스텝 해상도 정의 (VCO 1GHz 적용: 스텝당 약 17.857ps)
-PHASE_STEP_PS = 1000.0 / 56.0
-CLOCK_CYCLE_PS = 5000.0  # TDC 샘플링 클럭 (200MHz)
+print("=== TDC 통계 요약 (유효 구간 기준) ===")
+print(f"전체 측정 탭 범위 : 0 ~ 319")
+print(f"유효 데이터 탭 범위 : {tap_index[first_valid]} ~ {tap_index[last_valid]} (총 {len(tap_index_active)}개 탭)")
+print(f"평균 Hit Count : {mean_count:.1f}")
+print(f"최대 Hit Count : {np.max(hit_counts_active):.0f} (Tap {tap_index_active[np.argmax(hit_counts_active)]})")
+print(f"최소 Hit Count : {np.min(hit_counts_active):.0f} (Tap {tap_index_active[np.argmin(hit_counts_active)]})")
+print(f"Max DNL        : {np.max(dnl_active):.3f} LSB")
+print(f"Min DNL        : {np.min(dnl_active):.3f} LSB")
 
-# 각 데이터의 원본 지연 시간 계산 후 샘플링 클럭 주기로 모듈러 연산 적용
-grouped['raw_time_ps'] = grouped['current_loop_cnt'] * PHASE_STEP_PS
-grouped['phase_ps'] = grouped['raw_time_ps'] % CLOCK_CYCLE_PS
-[TRIPLE_BACKTICKS]
+# ==========================================
+# 4. 그래프 처리를 위한 빈 배열 생성 (NaN 처리)
+# ==========================================
+# 그래프의 X축은 0~319를 유지하되, 제외된 탭들은 그래프에 그려지지 않도록 NaN(Not a Number) 처리
+dnl_full = np.full(len(tap_index), np.nan)
+dnl_full[first_valid:last_valid+1] = dnl_active
 
----
+# ==========================================
+# 5. 그래프 그리기 (2개의 서브플롯)
+# ==========================================
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
 
-### [Step 2] 고속 벡터 분할 및 노이즈 필터링 (Ghost Tap Filtering)
-랩어라운드 경계(Clock Edge)를 지날 때 플립플롭의 메타스테빌리티(Metastability)로 인해 발생하는 가짜 데이터(Ghost Taps, 예: 갑자기 63, 8 등으로 튀는 값)를 제거합니다. `numpy.diff`를 통해 탭이 역방향으로 꺾이는 지점을 찾아 데이터를 분할한 뒤, **길이가 5 이하인 파편화된 조각은 노이즈로 간주하여 전면 폐기**합니다.
+# --- [Plot 1] 원본 히스토그램 ---
+ax1.bar(tap_index, hit_counts, width=1.0, color='royalblue', edgecolor='black', linewidth=0.5)
+ax1.axhline(mean_count, color='red', linestyle='--', linewidth=2, label=f'Active Mean: {mean_count:.0f}')
+ax1.axvspan(-1, first_valid-0.5, color='gray', alpha=0.2, label='Inactive Region (Tap 0)')
+ax1.axvspan(last_valid+0.5, 320, color='gray', alpha=0.2, label='Inactive Region (Out of Range)')
 
-**핵심 구현 파이썬 코드:**
+ax1.set_title('TDC Tap Histogram (Code Density Test)', fontsize=16, fontweight='bold')
+ax1.set_ylabel('Hit Count (Accumulated)', fontsize=12)
+ax1.legend(loc='upper right')
+ax1.grid(True, axis='y', linestyle='--', alpha=0.7)
 
-[TRIPLE_BACKTICKS]python
-# NumPy diff를 활용해 역방향 하락 지점을 기준으로 고속 분할
-diffs = np.diff(grouped['tap_idx'].values)
-split_indices = np.where(diffs < 0)[0] + 1
-segments_raw = np.split(grouped, split_indices)
+# --- [Plot 2] DNL (Differential Non-Linearity) ---
+# NaN 값이 들어간 부분은 Matplotlib이 자동으로 무시하고 그리지 않습니다.
+ax2.plot(tap_index, dnl_full, marker='o', markersize=3, linestyle='-', color='darkorange', linewidth=1)
+ax2.axhline(0, color='black', linestyle='-', linewidth=1)
+ax2.axvspan(-1, first_valid-0.5, color='gray', alpha=0.2)
+ax2.axvspan(last_valid+0.5, 320, color='gray', alpha=0.2)
 
-segments = []
-for seg in segments_raw:
-    # ★ 길이가 짧은 Ghost Tap (노이즈) 조각은 폐기
-    if len(seg) > 5:
-        segments.append(pd.DataFrame(seg))
+ax2.set_title('Differential Non-Linearity (DNL)', fontsize=14)
+ax2.set_xlabel('Tap Index (0 ~ 319)', fontsize=12)
+ax2.set_ylabel('DNL [LSB]', fontsize=12)
+ax2.set_xlim(0, 319)
 
-# 가장 길이가 긴 신뢰 구간을 Main으로 선정
-main_seg = max(segments, key=len)
-[TRIPLE_BACKTICKS]
+# 유효 DNL의 최대/최소값을 기준으로 Y축 범위 설정
+max_dnl_abs = max(abs(np.min(dnl_active)), abs(np.max(dnl_active)))
+# 만약 DNL이 너무 완벽해서 값이 작다면 최소 범위를 잡아줌
+ylim_margin = max(max_dnl_abs * 1.5, 0.1) 
+ax2.set_ylim(-ylim_margin, ylim_margin)
 
----
+ax2.grid(True, linestyle='--', alpha=0.7)
 
-### [Step 3] Phase Unwrapping: 연속 물리적 직선 복원
-인접 탭 간의 1차 차분 위상차 $\Delta \phi_i$를 탐색하여, 하향 돌출 경계 조건($-2500 \text{ ps}$ 미만) 발생 시 기준 오프셋을 클럭 주기($5000 \text{ ps}$) 단위로 증가시킴으로써 누적선 형태로 평탄화합니다. 이 과정에서 필터링되지 않은 노이즈가 있다면 $5000 \text{ ps}$ 스파이크가 발생하지만, Step 2의 강력한 필터링 덕분에 완벽한 직선이 보장됩니다.
-
-**수학적 모델:**
-
-$$\Delta \phi_i = \phi_i - \phi_{i-1}$$
-
-$$t_{\text{unwrap}}(i) = \phi_i + \text{offset}_i$$
-
-$$
-\text{offset}_i = \text{offset}_{i-1} + \begin{cases} 
-5000, & \text{if } \Delta \phi_i < -2500 \text{ ps} \\ 
-0, & \text{otherwise} 
-\end{cases}
-$$
-
----
-
-### [Step 4] 선형 외삽 및 보간 (Extrapolation & Interpolation)
-기본 `numpy.interp` 함수는 측정 범위를 벗어난 영역(예: 278 ~ 319번 탭)에 대해 마지막 값을 그대로 복사하는 **클램핑(Clamping) 한계**를 가집니다. 이로 인해 후반부 LUT 값이 평평하게 눕는 현상을 해결하기 위해, 양 끝단 5개 탭의 **물리적 기울기($m$)를 계산하여 직선을 우주 공간으로 연장하는 수학적 외삽법(Linear Extrapolation)**을 적용합니다.
-
-**수학적 모델 (선형 외삽법):**
-
-$$m_{\text{right}} = \frac{y_n - y_{n-4}}{x_n - x_{n-4}}$$
-
-$$y_{\text{extrapolate}}(x) = y_n + m_{\text{right}} \times (x - x_n) \quad (\text{단, } x > x_n)$$
-
-**핵심 구현 파이썬 코드:**
-
-[TRIPLE_BACKTICKS]python
-def extrapolate_interp(target_x, xp, yp):
-    # 범위를 벗어나는 데이터에 대해 마지막 5개 탭의 기울기를 연장하여 외삽
-    y = np.interp(target_x, xp, yp)
-    
-    # 우측 외삽 (측정 상한 탭 이후를 물리적 기울기로 연장)
-    if len(xp) > 5:
-        slope_right = (yp[-1] - yp[-5]) / (xp[-1] - xp[-5])
-        right_mask = target_x > xp[-1]
-        y[right_mask] = yp[-1] + slope_right * (target_x[right_mask] - xp[-1])
-        
-        # 좌측 외삽 (측정 하한 탭 이전 연장)
-        slope_left = (yp[4] - yp[0]) / (xp[4] - xp[0])
-        left_mask = target_x < xp[0]
-        y[left_mask] = yp[0] + slope_left * (target_x[left_mask] - xp[0])
-    return y
-
-target_taps = np.arange(320)
-calibrated_abs_time = extrapolate_interp(target_taps, sorted_taps, unwrapped_time)
-[TRIPLE_BACKTICKS]
-
----
-
-### [Step 5] Hardware Quantization: 최종 LUT 생성
-하드웨어 ROM 저장소에 내장하기 위하여 복원된 연속 절대 지연 데이터에 다시 한 차례 클럭 한계 주기 모듈러($\pmod{5000}$) 연산을 적용하고, 정수로 반올림합니다. 외삽법이 적용되었기 때문에 **가장 끝 탭(319번)도 5000ps 주기를 향해 정확한 간격으로 증가**합니다.
-
-**수학적 모델:**
-
-$$\text{LUT}(\text{tap}) = \text{round} \left( y_{\text{extrapolate}}(\text{tap}) \pmod{T_{\text{clk}}} \right)$$
-
----
-
-## 4. 핵심 탭 데이터 정량적 정합성 총괄표
-
-| Tap Index | 보정 데이터 상태 구분 | 양자화 산출 수식 | 보정 결과 설명 |
-| :---: | :--- | :--- | :--- |
-| **0** | 좌측 선형 외삽 영역 (Left Extrapolation) | $\text{round}(y_0 - m_{\text{left}} \cdot \Delta x \pmod{5000})$ | 시작점(Tap 1)에서 기울기 역산 추론 |
-| **1** | 실측 데이터 하한선 | $\text{round}(y_1 \pmod{5000})$ | 실제 측정 데이터 시작 원점 |
-| **2~3** | 소실 구간 선형 보간 (Interpolation) | $\text{round}(y_{\text{interp}}(x) \pmod{5000})$ | 내부 결측치 선형 연결 |
-| **156** | 랩어라운드 발생 보정 상태 | $\text{round}(y_{\text{unwrap}}(x) \pmod{5000})$ | Phase Unwrapping 수직 보상 통과 |
-| **277** | 조각 병합 최대 유효 수집 한계 | $\text{round}(y_n \pmod{5000})$ | 노이즈 필터링 후 생존한 최후 실측값 |
-| **278~319** | 우측 선형 외삽 영역 (Right Extrapolation) | $\text{round}(y_n + m_{\text{right}} \cdot \Delta x \pmod{5000})$ | **더 이상 마지막 값으로 눕지 않고, 기울기($17.85\text{ps}$)를 유지하며 정밀하게 증가함** |
-
----
-
-## 5. 결론 (Conclusion)
-설계된 5단계 데이터 가공 모델은 하드웨어 내부 비동기 검출 회로의 Wrap-around 분절 특성과 메타스테빌리티로 인한 Ghost Tap 노이즈를 근본적으로 차단합니다. 특히, `numpy.diff` 기반의 **고속 노이즈 세그먼트 폐기 로직**과 미측정 영역의 왜곡을 방지하는 **선형 외삽(Linear Extrapolation) 수치 해석**을 도입함으로써, 하드웨어 타이밍 클로저(Timing Closure) 분석 시 발생할 수 있는 디지털 양자화 오류를 오차율 0%에 수렴하도록 설계하였습니다.
-"""
-
-# 렌더링 충돌 우회를 위해 임시 식별자 [TRIPLE_BACKTICKS]를 실제 백틱인 ```로 환원합니다.
-final_content = report_content.replace("[TRIPLE_BACKTICKS]", "```")
-
-# 파일 저장 실행
-with open("TDC_Calibration_Report.md", "w", encoding="utf-8") as file:
-    file.write(final_content)
-
-print("■ 새로운 알고리즘(고스트 탭 필터링 & 외삽법)이 반영된 'TDC_Calibration_Report.md' 파일이 성공적으로 생성되었습니다.")
+plt.tight_layout()
+plt.show()
