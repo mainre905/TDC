@@ -7,7 +7,7 @@ module tdc_test_top #(
     // 1 : Hit = Ring Osc(랜덤)   | Clock = Fixed 200MHz  (기본 동작 및 탭 누적 테스트용)
     // 2 : Hit = 외부 STM32 신호  | Clock = Fixed 200MHz  (실제 측정용)
     // ==========================================================
-    parameter integer OPERATION_MODE = 1
+    parameter integer OPERATION_MODE = 0
 )(
     input  wire       clk_125, 
     input  wire       rst_n, 
@@ -53,7 +53,7 @@ module tdc_test_top #(
         if (!clk_locked) begin 
             sync_cnt <= 0; test_hit_sync <= 0; 
         end else begin 
-            if (sync_cnt == 16'd49999) sync_cnt <= 0; 
+            if (sync_cnt == 16'd13332) sync_cnt <= 0; 
             else sync_cnt <= sync_cnt + 1; 
 
             if (sync_cnt < 16'd4) test_hit_sync <= 1'b1; 
@@ -202,13 +202,11 @@ module tdc_test_top #(
     // 7. ILA (Integrated Logic Analyzer) 갱신
     // ==========================================================
     // 트리거 신호와 리드아웃 정보를 수집하도록 변경
-    ila_0 your_ila_instance (
-        .clk    (tdc_clk), 
-        .probe0 (readout_active),   // [0:0]  ILA 트리거 소스 (0 -> 1 상승에지 트리거)
-        .probe1 (probe_read_addr),  // [8:0]  출력 중인 지연선 탭 번호 (0 ~ 319)
-        .probe2 (histo_read_data),  // [31:0] 해당 탭의 누적 통계 카운트 데이터
-        .probe3 (tdc_hit_in),       // [0:0]  Ring Oscillator 파형 유입 여부 모니터링
-        .probe4 (final_ts_valid)    // [0:0]  TDC 모듈 출력 플래그
-    );
+ila_0 your_ila_instance (
+    .clk    (tdc_clk), 
+    .probe0 (current_loop_cnt), // [8:0] MMCM의 현재 위상 스텝 (0 ~ 350)
+    .probe1 (aligned_fine_idx), // [8:0] 현재 캡처된 TDC 탭 번호 (0 ~ 319)
+    .probe2 (final_ts_valid)    // [0:0] 데이터 유효 플래그
+);
 
 endmodule

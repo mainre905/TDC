@@ -1,14 +1,17 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-
+import os
 # ==========================================
 # 1. 파일 설정 및 데이터 로드
 # ==========================================
-csv_file = "histo.csv"
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+csv_filename = "histo.csv" 
+csv_file_path = os.path.join(current_dir, csv_filename)
 
 try:
-    df = pd.read_csv(csv_file, skiprows=[1])
+    df = pd.read_csv(csv_file_path, skiprows=[1])
     df.columns = df.columns.str.strip()
 except FileNotFoundError:
     print(f"Error: '{csv_file}' 파일을 찾을 수 없습니다.")

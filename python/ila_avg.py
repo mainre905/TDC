@@ -1,62 +1,66 @@
-import pandas as pd
-import numpy as np
 import os
+import pandas as pd
+import matplotlib.pyplot as plt
 
 # ============================================================
-# 0. 파일 확인
+# 0. 파일 경로 설정
 # ============================================================
-# 1. 현재 실행 중인 파이썬 스크립트 파일(.py)이 있는 폴더의 절대 경로를 가져옵니다.
 script_dir = os.path.dirname(os.path.abspath(__file__))
-
-# 2. 그 폴더 경로와 'iladata.csv' 파일 이름을 합쳐서 정확한 전체 경로를 만듭니다.
 csv_filepath = os.path.join(script_dir, 'iladata.csv')
 
+print(f"📂 읽어올 파일 경로: {csv_filepath}")
 
 # ============================================================
-# 1. 데이터 로드
+# 1. 데이터 불러오기
 # ============================================================
-df = pd.read_csv(csv_filepath, skiprows=[1])
-
-# 컬럼 이름 정리
-df.columns = [c.strip().split("[")[0] for c in df.columns]
-
-# 필요한 컬럼 숫자형 변환
-for col in ["ts_valid_d2", "ts_fine_idx_d2", "current_loop_cnt"]:
-    df[col] = pd.to_numeric(df[col], errors="coerce")
-
-# 유효 데이터만 필터링
-df_valid = df.dropna(subset=["ts_fine_idx_d2", "current_loop_cnt"]).copy()
-df_valid = df_valid[df_valid["ts_valid_d2"] == 1]
+try:
+    df = pd.read_csv(csv_filepath)
+    print("✅ CSV 파일을 성공적으로 불러왔습니다.")
+except FileNotFoundError:
+    print(f"❌ 에러: '{csv_filepath}' 파일을 찾을 수 없습니다.")
+    exit()
 
 # ============================================================
-# 2. 시간 계산 (Step 1)
+# 2. Vivado ILA 컬럼 이름 자동 매칭
 # ============================================================
-PHASE_STEP_PS = 1000.0 / 56.0
-df_valid["time_ps"] = df_valid["current_loop_cnt"] * PHASE_STEP_PS
+try:
+    loop_col = [col for col in df.columns if 'current_loop_cnt' in col][0]
+    fine_col = [col for col in df.columns if 'aligned_fine_idx' in col][0]
+except IndexError:
+    print("❌ 에러: CSV 파일에서 해당 신호 이름을 찾을 수 없습니다.")
+    exit()
+
+df[loop_col] = pd.to_numeric(df[loop_col], errors='coerce')
+df[fine_col] = pd.to_numeric(df[fine_col], errors='coerce')
+df = df.dropna()
 
 # ============================================================
-# 3. loop_cnt 기준 평균 tap 계산 (Step 2)
+# 3. 데이터 통계 처리 (Averaging)
 # ============================================================
-result = df_valid.groupby("current_loop_cnt").agg({
-    "ts_fine_idx_d2": "mean",
-    "time_ps": "first"   # 같은 loop_cnt라 동일 값
-}).reset_index()
+calibration_curve = df.groupby(loop_col)[fine_col].mean()
 
-# tap 정수화
-result["tap_avg"] = np.round(result["ts_fine_idx_d2"]).astype(int)
+# ★ 판다스 출력 제한 해제 (전체 행 출력) ★
+pd.set_option('display.max_rows', None)
 
-# 컬럼 정리
-result = result[["current_loop_cnt", "tap_avg", "time_ps"]]
+print("\n==================================================")
+print("--- 전체 캘리브레이션 데이터 (Wrap Around 확인용) ---")
+print("==================================================")
+print(calibration_curve)
+print("==================================================")
 
-# ============================================================
-# 4. CSV 저장 (하나의 파일)
-# ============================================================
-output_file = "loopcnt_tap_time.csv"
-result.to_csv(output_file, index=False)
+# 출력 제한 원상복구
+pd.reset_option('display.max_rows')
 
 # ============================================================
-# 5. 출력 확인
+# 4. 논문용 그래프 출력 (Wrap-around 눈으로 확인하기)
 # ============================================================
-print(f"\n✅ 저장 완료: {output_file}")
-print("\n📌 일부 결과:")
-print(result.head(10))
+plt.figure(figsize=(10, 6))
+calibration_curve.plot(marker='.', linestyle='-', color='r', markersize=6, alpha=0.8)
+
+plt.title("Raw Calibration Curve with Wrap Around", fontsize=14, fontweight='bold')
+plt.xlabel("MMCM Phase Step [current_loop_cnt]", fontsize=12)
+plt.ylabel("Average TDC Tap Index", fontsize=12)
+plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+
+plt.tight_layout()
+plt.show()
