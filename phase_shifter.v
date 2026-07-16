@@ -46,7 +46,7 @@ module mmcm_phase_shifter (
                     if (delay_cnt == DELAY_MAX) begin 
                         delay_cnt <= 0; 
                         // ★ 수정 3: 스윕 횟수를 350번으로 연장하여 5ns 한 주기를 여유 있게 덮음
-                        if (loop_cnt == 9'd350) begin busy<=0; state<=IDLE; end 
+                        if (loop_cnt == 9'd280) begin busy<=0; state<=IDLE; end 
                         else state<=SHIFT; 
                     end else begin
                         delay_cnt <= delay_cnt + 1; 

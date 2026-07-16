@@ -2,7 +2,6 @@
 
 module tdc_test_top #(
     // ==========================================================
-    // ★★★ 동작 모드 정의 (사용자 피드백 반영) ★★★
     // 0 : Hit = Test Sync(내부)  | Clock = Shifted 200MHz (MMCM 캘리브레이션용)
     // 1 : Hit = Ring Osc(랜덤)   | Clock = Fixed 200MHz  (기본 동작 및 탭 누적 테스트용)
     // 2 : Hit = 외부 STM32 신호  | Clock = Fixed 200MHz  (실제 측정용)
@@ -11,8 +10,8 @@ module tdc_test_top #(
 )(
     input  wire       clk_125, 
     input  wire       rst_n, 
-    input  wire       btn_shift,   // 물리 버튼 (ILA Sweep Trigger 및 MMCM Shift 공용)
-    input  wire       ext_hit_in,  // ZYBO PMOD JB1 (V8 Pin)
+    input  wire       btn_shift,   
+    input  wire       ext_hit_in,  
     output wire [3:0] led
 );
 
@@ -53,10 +52,10 @@ module tdc_test_top #(
         if (!clk_locked) begin 
             sync_cnt <= 0; test_hit_sync <= 0; 
         end else begin 
-            if (sync_cnt == 16'd13332) sync_cnt <= 0; 
+            if (sync_cnt == 16'd9) sync_cnt <= 0; 
             else sync_cnt <= sync_cnt + 1; 
 
-            if (sync_cnt < 16'd4) test_hit_sync <= 1'b1; 
+            if (sync_cnt < 16'd2) test_hit_sync <= 1'b1; 
             else test_hit_sync <= 1'b0;
         end 
     end
@@ -94,11 +93,11 @@ module tdc_test_top #(
             assign tdc_hit_in = test_hit_sync;
             assign tdc_clk    = clk_200_shifted;
         end
-        else if (OPERATION_MODE == 1) begin : MODE_1_RO_TEST       // Mode 1 = Ring Osc 연결
+        else if (OPERATION_MODE == 1) begin : MODE_1_RO_TEST
             assign tdc_hit_in = hit_random;
             assign tdc_clk    = clk_200_fixed;
         end
-        else begin : MODE_2_EXT_STM32                             // Mode 2 = 외부 STM32 연결
+        else begin : MODE_2_EXT_STM32
             assign tdc_hit_in = ext_hit_in;
             assign tdc_clk    = clk_200_fixed;
         end
@@ -141,18 +140,19 @@ module tdc_test_top #(
     );
 
     // ==========================================================
-    // 5. 버튼 디바운싱 및 온칩 ILA 리드아웃 스캐너
+    // 5. 온칩 ILA 리드아웃 스캐너 (350 도달 시 자동 출력)
     // ==========================================================
-    reg btn_shift_d1, btn_shift_d2;
-    always @(posedge tdc_clk) begin
-        btn_shift_d1 <= btn_shift;
-        btn_shift_d2 <= btn_shift_d1;
-    end
-    wire btn_trigger_sweep = (btn_shift_d1 && !btn_shift_d2);
-
     reg        readout_active;
     reg [8:0]  sweep_addr;
     reg [8:0]  probe_read_addr; 
+
+    reg [8:0] loop_cnt_d1;
+    always @(posedge tdc_clk) begin
+        loop_cnt_d1 <= current_loop_cnt;
+    end
+
+    // 위상 스윕이 350번까지 딱 끝나는 순간 감지
+    wire sweep_finished = (current_loop_cnt == 9'd280) && (loop_cnt_d1 == 9'd279);
 
     always @(posedge tdc_clk or negedge clk_locked) begin
         if (!clk_locked) begin
@@ -160,7 +160,7 @@ module tdc_test_top #(
             sweep_addr      <= 9'd0;
             probe_read_addr <= 9'd0;
         end else begin
-            if (btn_trigger_sweep && !readout_active) begin
+            if (sweep_finished && !readout_active) begin
                 readout_active <= 1'b1;
                 sweep_addr     <= 9'd0;
             end else if (readout_active) begin
@@ -170,14 +170,25 @@ module tdc_test_top #(
                     sweep_addr <= sweep_addr + 1'b1;
                 end
             end
-            // BRAM Read Latency (1 clk) 보정
             probe_read_addr <= sweep_addr;
         end
     end
 
     // ==========================================================
-    // 6. 히스토그램 모듈 인스턴스
+    // 6. 히스토그램 데이터 게이팅 및 모듈 인스턴스 (핵심 수정)
     // ==========================================================
+    wire gated_ts_valid;
+
+    generate
+        if (OPERATION_MODE == 0) begin : MODE_0_HISTO_CTRL
+            // Mode 0: 스윕(Phase Shift) 중일 때만 Hit 누적! (대기 중 쌓이는 쓰레기 값 차단)
+            assign gated_ts_valid = final_ts_valid && ps_busy;
+        end else begin : MODE_1_HISTO_CTRL
+            // Mode 1: 대기 중에도 백그라운드에서 자연스럽게 수백만 개가 누적되도록 항상 켬
+            assign gated_ts_valid = final_ts_valid;
+        end
+    endgenerate
+
     wire [31:0] histo_read_data;
 
     tdc_histogram #(
@@ -187,26 +198,25 @@ module tdc_test_top #(
         .clk         (tdc_clk),
         .rst_n       (clk_locked),
         .ts_fine_idx (aligned_fine_idx),
-        .ts_valid    (final_ts_valid),
-        .read_addr   (sweep_addr),
+        .ts_valid    (gated_ts_valid),   
+        .read_addr   (probe_read_addr),
         .read_data   (histo_read_data)
     );
 
-    // 외부 보드 상태 LED 맵핑
     assign led[0] = clk_locked; 
-    assign led[1] = readout_active; // 리드아웃 스위핑 동작 시 점등
+    assign led[1] = readout_active; 
     assign led[2] = tdc_hit_in;    
     assign led[3] = final_ts_valid; 
 
     // ==========================================================
     // 7. ILA (Integrated Logic Analyzer) 갱신
     // ==========================================================
-    // 트리거 신호와 리드아웃 정보를 수집하도록 변경
-ila_0 your_ila_instance (
-    .clk    (tdc_clk), 
-    .probe0 (current_loop_cnt), // [8:0] MMCM의 현재 위상 스텝 (0 ~ 350)
-    .probe1 (aligned_fine_idx), // [8:0] 현재 캡처된 TDC 탭 번호 (0 ~ 319)
-    .probe2 (final_ts_valid)    // [0:0] 데이터 유효 플래그
-);
-
+    ila_0 your_ila_instance (
+        .clk    (tdc_clk), 
+        .probe0 (readout_active),       // [0:0] Trigger Setup에 넣고 '1'로 설정
+        .probe1 (probe_read_addr),      // [8:0] X축: Tap 번호
+        .probe2 (histo_read_data),      // [31:0] Y축: 카운트 값
+        .probe3 (current_loop_cnt),     // [8:0]
+        .probe4 (aligned_fine_idx)      // [8:0]
+    );
 endmodule
