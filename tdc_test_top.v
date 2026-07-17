@@ -121,7 +121,6 @@ module tdc_test_top #(
     
     wire [63:0] final_timestamp_ps;
     wire        final_ts_valid;
-    wire        aligned_hit;
     wire [8:0]  aligned_fine_idx;
     wire [31:0] aligned_coarse;
 
@@ -131,11 +130,9 @@ module tdc_test_top #(
         .ts_coarse       (raw_ts_coarse),
         .ts_fine_idx     (raw_ts_fine_idx),
         .ts_valid        (raw_ts_valid),
-        .hit             (tdc_hit_in),
-        .timestamp_ps    (final_timestamp_ps),    
-        .timestamp_valid (final_ts_valid),        
-        .hit_out         (aligned_hit),           
-        .fine_idx_out    (aligned_fine_idx),      
+        .timestamp_ps    (final_timestamp_ps),
+        .timestamp_valid (final_ts_valid),
+        .fine_idx_out    (aligned_fine_idx),
         .coarse_out      (aligned_coarse)         
     );
 
@@ -144,21 +141,44 @@ module tdc_test_top #(
     // ==========================================================
     reg        readout_active;
     reg [8:0]  sweep_addr;
-    reg [8:0]  probe_read_addr; 
+    reg [8:0]  probe_read_addr;
 
-    reg [8:0] loop_cnt_d1;
-    always @(posedge tdc_clk) begin
-        loop_cnt_d1 <= current_loop_cnt;
-    end
+    // ★ ILA 리드아웃 정렬 수정: BRAM read latency 보상용 주소 지연 레지스터
+    // 히스토그램 BRAM의 Port B는 출력이 레지스터드(dout_b <= mem[addr_b])라 read latency가 1클럭입니다.
+    //   → 사이클 N의 histo_read_data = 사이클 N-1의 read_addr가 가리킨 값
+    // ILA는 probe1(주소)과 probe2(데이터)를 같은 엣지에서 캡처하므로, 주소를 그대로 연결하면
+    // "주소 N" 옆에 "bin N-1의 카운트"가 찍혀 히스토그램 전체가 1-bin 밀립니다.
+    // 주소도 데이터와 똑같이 1클럭 지연시켜 동일 사이클에서 짝이 맞도록 정렬합니다.
+    reg [8:0]  probe_read_addr_d1;
 
-    // 위상 스윕이 350번까지 딱 끝나는 순간 감지
-    wire sweep_finished = (current_loop_cnt == 9'd280) && (loop_cnt_d1 == 9'd279);
+    // ★ CDC 및 조기 트리거 수정 1: 이종 클럭(fixed -> shifted) 간 안전한 ps_busy 동기화를 위한 3단 FF 구현
+    reg ps_busy_sync_d1;
+    reg ps_busy_sync_d2;
+    reg ps_busy_sync_d3; // 하강 에지 검출용 지연 레지스터
 
     always @(posedge tdc_clk or negedge clk_locked) begin
         if (!clk_locked) begin
-            readout_active  <= 1'b0;
-            sweep_addr      <= 9'd0;
-            probe_read_addr <= 9'd0;
+            ps_busy_sync_d1 <= 1'b0;
+            ps_busy_sync_d2 <= 1'b0;
+            ps_busy_sync_d3 <= 1'b0;
+        end else begin
+            ps_busy_sync_d1 <= ps_busy;
+            ps_busy_sync_d2 <= ps_busy_sync_d1; // 메타스테빌리티 방지 보장
+            ps_busy_sync_d3 <= ps_busy_sync_d2; // 하강 에지 구분을 위해 1클럭 더 지연
+        end
+    end
+
+    // ★ CDC 및 조기 트리거 수정 2: 
+    // 다중 비트 loop_cnt 비교 대신, 280단계 대기가 끝나고 ps_busy가 1에서 0으로 떨어지는 순간(하강 에지)을 
+    // 검출하여 대기 시간이 완전히 충족된 최종 시점에 정확히 readout을 가동시킵니다.
+    wire sweep_finished = (!ps_busy_sync_d2 && ps_busy_sync_d3);
+
+    always @(posedge tdc_clk or negedge clk_locked) begin
+        if (!clk_locked) begin
+            readout_active     <= 1'b0;
+            sweep_addr         <= 9'd0;
+            probe_read_addr    <= 9'd0;
+            probe_read_addr_d1 <= 9'd0;
         end else begin
             if (sweep_finished && !readout_active) begin
                 readout_active <= 1'b1;
@@ -170,7 +190,8 @@ module tdc_test_top #(
                     sweep_addr <= sweep_addr + 1'b1;
                 end
             end
-            probe_read_addr <= sweep_addr;
+            probe_read_addr    <= sweep_addr;      // BRAM Port B로 나가는 실제 읽기 주소
+            probe_read_addr_d1 <= probe_read_addr; // ★ BRAM 1클럭 지연분 보상 → ILA에서 histo_read_data와 동일 사이클
         end
     end
 
@@ -182,7 +203,8 @@ module tdc_test_top #(
     generate
         if (OPERATION_MODE == 0) begin : MODE_0_HISTO_CTRL
             // Mode 0: 스윕(Phase Shift) 중일 때만 Hit 누적! (대기 중 쌓이는 쓰레기 값 차단)
-            assign gated_ts_valid = final_ts_valid && ps_busy;
+            // ★ CDC 수정 3: tdc_clk 도메인으로 동기화가 완료된 ps_busy_sync_d2를 적용하여 글리치 및 타이밍 불일치 차단
+            assign gated_ts_valid = final_ts_valid && ps_busy_sync_d2;
         end else begin : MODE_1_HISTO_CTRL
             // Mode 1: 대기 중에도 백그라운드에서 자연스럽게 수백만 개가 누적되도록 항상 켬
             assign gated_ts_valid = final_ts_valid;
@@ -205,7 +227,13 @@ module tdc_test_top #(
 
     assign led[0] = clk_locked; 
     assign led[1] = readout_active; 
-    assign led[2] = tdc_hit_in;    
+    // ★ Entry transient 수정: 과거 led[2]에 tdc_hit_in을 연결했으나 제거함.
+    //   hit 네트가 딜레이라인 CYINIT과 LED 패드(G14)를 동시에 구동하면서
+    //   배선 부하로 에지 slew가 저하되고, 그 결과 CARRY4 초입에 entry transient 발생.
+    //   (실측: net delay 4227ps / CARRY4#0 소비시간 129.71ps = 이상값 68.5ps의 1.89배,
+    //    #1 1.51배, #2 1.16배로 감쇠하다 #3부터 정상 회복 → DNL 최댓값 +3.234의 주범)
+    //   hit은 CYINIT 외에 어떤 부하도 걸어서는 안 되므로 연결하지 않는다.
+    assign led[2] = 1'b0;
     assign led[3] = final_ts_valid; 
 
     // ==========================================================
@@ -214,7 +242,9 @@ module tdc_test_top #(
     ila_0 your_ila_instance (
         .clk    (tdc_clk), 
         .probe0 (readout_active),       // [0:0] Trigger Setup에 넣고 '1'로 설정
-        .probe1 (probe_read_addr),      // [8:0] X축: Tap 번호
+        // ★ probe1은 반드시 probe_read_addr가 아닌 probe_read_addr_d1을 연결할 것.
+        //   BRAM read latency(1클럭) 때문에 지연되지 않은 주소를 쓰면 X축이 Y축보다 1 앞서 밀립니다.
+        .probe1 (probe_read_addr_d1),   // [8:0] X축: Tap 번호 (histo_read_data와 정렬됨)
         .probe2 (histo_read_data),      // [31:0] Y축: 카운트 값
         .probe3 (current_loop_cnt),     // [8:0]
         .probe4 (aligned_fine_idx)      // [8:0]

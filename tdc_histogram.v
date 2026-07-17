@@ -28,6 +28,13 @@ module tdc_histogram #(
     reg [ADDR_WIDTH-1:0] active_addr;
     reg [DATA_WIDTH-1:0] count_reg;
 
+    // ★ Setup 타이밍 수정: BRAM 출력을 '로직 없이' 받아두는 중간 레지스터.
+    // RAMB36E1은 출력 레지스터를 쓰지 않으면 clock-to-out이 ~3ns(Zynq-7000 -1, slow corner)에 달합니다.
+    // 여기에 32비트 캐리 체인(+1)까지 같은 사이클에 붙이면 5ns 예산을 초과합니다.
+    //   (실측: logic 3.991ns + route 0.916ns = 4.907ns > 예산 4.71ns → slack -0.180ns)
+    // BRAM Tcko 경로와 가산기 경로를 서로 다른 사이클로 분리하기 위한 레지스터입니다.
+    reg [DATA_WIDTH-1:0] count_raw;
+
     reg                  ram_we_a;
     reg  [ADDR_WIDTH-1:0] ram_addr_a;
     reg  [DATA_WIDTH-1:0] ram_din_a;
@@ -42,6 +49,7 @@ module tdc_histogram #(
             clear_addr <= 0;
             active_addr <= 0;
             count_reg <= 0;
+            count_raw <= 0;
         end else begin
             case (state)
                 STATE_IDLE: begin
@@ -60,14 +68,17 @@ module tdc_histogram #(
                 end
                 
                 STATE_RMW_R: begin
-                    // BRAM에서 데이터가 나오길 기다림
+                    // IDLE에서 이미 주소를 걸어놨으므로 ram_dout_a는 이 사이클에 유효합니다.
+                    // ★ 여기서는 +1을 하지 않고 '캡처만' 합니다.
+                    //   경로: BRAM(Tcko ~3ns) -> route -> FF(D). 조합 로직이 없어 여유 있게 닫힘.
+                    count_raw <= ram_dout_a;
                     state <= STATE_RMW_A;
                 end
-                
+
                 STATE_RMW_A: begin
-                    // ★ Setup 타이밍 해결 핵심: 
-                    // BRAM에서 나온 값(ram_dout_a)에 +1을 한 뒤 FF(count_reg)에 안전하게 임시 저장
-                    count_reg <= ram_dout_a + 1'b1; 
+                    // ★ 이제 +1은 FF -> 32비트 가산기 -> FF 경로가 됩니다.
+                    //   BRAM Tcko가 경로에서 빠지므로 캐리 체인 전파(~1ns)만 남아 크게 여유가 생깁니다.
+                    count_reg <= count_raw + 1'b1;
                     state <= STATE_RMW_W;
                 end
                 

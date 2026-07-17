@@ -5,3 +5,5 @@
 loopcnt_tap_time.csv
 *csv
 *coe
+__pycache__/
+*.pyc

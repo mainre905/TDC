@@ -147,8 +147,84 @@ def main():
     plt.grid(axis='y', linestyle='--', alpha=0.7)
     plt.legend(fontsize=12)
     plt.tight_layout()
-    
-    # 창 띄우기
+
+    # ---------------------------------------------------------
+    # 8. CARRY4 내부 위치별(tap % 4) 분포 분석
+    # ---------------------------------------------------------
+    # 유효 구간 자동 검출:
+    #   tap 0      → 스냅샷 조건(tap[0]==1)상 popcount=0이 불가능하여 항상 비어있음
+    #   끝단 taps  → 딜레이라인이 1클럭(5ns)보다 길어 도달하지 못함
+    #   → 이 구간을 포함하면 그룹 평균이 0에 끌려가 왜곡되므로 반드시 제외
+    nz = np.nonzero(counts)[0]
+    if len(nz) == 0:
+        print("[!] No non-zero bins; skipping CARRY4 analysis.")
+        return
+    v_taps   = taps[nz[0]:nz[-1]+1]
+    v_counts = counts[nz[0]:nz[-1]+1]
+
+    total_v  = v_counts.sum()
+    ideal_ps = 5000.0 / len(v_taps)   # 200MHz 한 주기(5000ps)를 유효 bin 수로 분배
+
+    print("\n" + "="*50)
+    print(" 🔬 CARRY4 POSITION ANALYSIS (tap % 4)")
+    print("="*50)
+    print(f" Valid Range   : tap {v_taps[0]} ~ {v_taps[-1]} ({len(v_taps)} bins)")
+    print(f" Ideal Bin     : {ideal_ps:.2f} ps")
+    print("-"*50)
+
+    group_mean = {}
+    for m in range(4):
+        sel = v_counts[v_taps % 4 == m]
+        group_mean[m] = sel.mean()
+        w = sel.mean() / total_v * 5000.0     # 코드밀도 → 실제 폭(ps)
+        print(f" tap%4=={m} : mean={sel.mean():>10,.0f}  width={w:6.2f} ps  ({w/ideal_ps:.2f}x)")
+
+    ratio = max(group_mean.values()) / max(min(group_mean.values()), 1)
+    print("-"*50)
+    print(f" Widest/Narrowest Ratio : {ratio:.2f}x")
+    print("="*50 + "\n")
+
+    # ---------------------------------------------------------
+    # 9. CARRY4 위치별 Scatter 시각화
+    # ---------------------------------------------------------
+    _, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
+    rng = np.random.default_rng(0)
+
+    # [좌] CARRY4 내 위치별 분포
+    for m in range(4):
+        sel = v_counts[v_taps % 4 == m]
+        x = m + rng.uniform(-0.28, 0.28, size=len(sel))   # 점 겹침 방지용 jitter
+        ax1.scatter(x, sel, s=18, alpha=0.55, color=colors[m], edgecolors='none')
+        ax1.hlines(group_mean[m], m-0.38, m+0.38, color='black', lw=2.5, zorder=5)
+        ax1.text(m, group_mean[m]*1.06, f'{group_mean[m]:,.0f}',
+                 ha='center', fontsize=10, fontweight='bold')
+
+    ax1.axhline(v_counts.mean(), color='red', ls='--', lw=1.5,
+                label=f'Overall Mean = {v_counts.mean():,.0f}')
+    ax1.set_xticks(range(4))
+    ax1.set_xticklabels([f'O[{m}]\n(tap%4=={m})' for m in range(4)])
+    ax1.set_xlabel('Position within CARRY4', fontsize=13)
+    ax1.set_ylabel('Hit Count  (∝ bin width)', fontsize=13)
+    ax1.set_title(f'CARRY4 Position Distribution\n(Widest/Narrowest = {ratio:.2f}x)',
+                  fontsize=14, fontweight='bold')
+    ax1.grid(axis='y', ls='--', alpha=0.6)
+    ax1.legend()
+
+    # [우] 체인 위치에 따른 분포
+    for m in range(4):
+        ax2.scatter(v_taps[v_taps % 4 == m], v_counts[v_taps % 4 == m],
+                    s=14, alpha=0.7, color=colors[m], label=f'tap%4=={m}')
+    ax2.axhline(v_counts.mean(), color='red', ls='--', lw=1.2)
+    ax2.set_xlabel('Tap Index', fontsize=13)
+    ax2.set_ylabel('Hit Count', fontsize=13)
+    ax2.set_title('Distribution along the Delay Line', fontsize=14, fontweight='bold')
+    ax2.grid(axis='y', ls='--', alpha=0.6)
+    ax2.legend(markerscale=2)
+
+    plt.tight_layout()
+
+    # 창 띄우기 (막대그래프 + Scatter 2창이 함께 뜸)
     plt.show()
 
 if __name__ == "__main__":
