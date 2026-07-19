@@ -1,107 +1,142 @@
 import os
+import glob
 import numpy as np
 import pandas as pd
-from scipy.interpolate import interp1d
-from scipy.stats import linregress
 import matplotlib.pyplot as plt
 
 # =========================================================================
-# 1. 설정 및 데이터 로드
+# 0. 설정
 # =========================================================================
-PHASE_STEP_PS = 1000.0 / 56.0  # 1GHz VCO 기준 약 17.857 ps/step
-NUM_TOTAL_TAPS = 320           # CARRY4 80 Stage * 4
+# 하드웨어 제약 (tdc_calib_rom / tdc_timestamp_calc.v 와 일치해야 함)
+#   ROM  : 깊이 320, 폭 13비트(0~8191 ps), latency 2
+#   연산 : timestamp = coarse*5000 - calibrated_fine_ps[fine_idx]
+#   → LUT[i] = "tap i일 때 클럭 엣지보다 얼마나 앞서 도착했는가(ps)", 단조 증가, 0~5000
+T_PERIOD_PS    = 5000.0    # tdc_clk 한 주기 (200MHz)
+NUM_TOTAL_TAPS = 320       # ROM 깊이 = CARRY4 80단 x 4
+ROM_MAX_VALUE  = 8191      # 13비트 상한
+EDGE_TRIM_FRAC = 0.05      # 유효 구간 끝단 컷 (평균의 5% 미만인 양 끝 bin 제거)
+
+# Calibration set: COE를 만들 raw 히스토그램. None이면 가장 최근 파일.
+CAL_CSV = "tap_histogram_20260719_160115.csv"
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
-csv_filepath = os.path.join(script_dir, "stitched_data.csv") # 사용자 전처리 파일
 
+if CAL_CSV:
+    csv_filepath = os.path.join(script_dir, CAL_CSV)
+else:
+    cands = sorted(glob.glob(os.path.join(script_dir, "tap_histogram_*.csv")))
+    if not cands:
+        print("❌ tap_histogram_*.csv 가 없습니다. Histogram.py를 먼저 실행하세요.")
+        exit()
+    csv_filepath = cands[-1]
+
+print(f"[*] Calibration set: {os.path.basename(csv_filepath)}")
+
+# =========================================================================
+# 1. 데이터 로드
+# =========================================================================
 try:
     df = pd.read_csv(csv_filepath)
 except FileNotFoundError:
-    print(f"❌ '{csv_filepath}' 파일이 없습니다.")
+    print(f"❌ '{csv_filepath}' 파일을 찾을 수 없습니다.")
     exit()
 
-col_loop = [c for c in df.columns if 'loop' in c.lower()][0]
-col_tap = [c for c in df.columns if 'tap' in c.lower()][0]
+col_tap   = [c for c in df.columns if 'tap' in c.lower()][0]
+col_count = [c for c in df.columns if 'count' in c.lower() or 'hit' in c.lower()][0]
 
-loops = pd.to_numeric(df[col_loop], errors="coerce").values
-taps = pd.to_numeric(df[col_tap], errors="coerce").values
-
-valid_mask = ~np.isnan(loops) & ~np.isnan(taps)
-loops = loops[valid_mask]
-taps = taps[valid_mask]
-
-# 절대 시간(ps) 변환
-time_ps = (loops - loops[0]) * PHASE_STEP_PS
-
-# 동일 탭 노이즈 평균화 및 정렬
-df_clean = pd.DataFrame({'tap': taps, 'time': time_ps}).groupby('tap')['time'].mean().reset_index()
-df_clean = df_clean.sort_values(by='tap').reset_index(drop=True)
-
-final_taps = df_clean['tap'].values
-final_times = df_clean['time'].values
+# tap 0 ~ NUM_TOTAL_TAPS-1 전체 길이의 배열로 정규화 (빠진 tap은 0으로 채움)
+counts_full = np.zeros(NUM_TOTAL_TAPS, dtype=float)
+for tap, cnt in zip(pd.to_numeric(df[col_tap], errors="coerce"),
+                    pd.to_numeric(df[col_count], errors="coerce")):
+    if not (np.isnan(tap) or np.isnan(cnt)):
+        ti = int(tap)
+        if 0 <= ti < NUM_TOTAL_TAPS:
+            counts_full[ti] = cnt
 
 # =========================================================================
-# 2. 완벽한 직선 연장 (Global Slope Extrapolation)
+# 2. 유효 구간 검출 (양 끝단에서만 트리밍)
 # =========================================================================
-# 1) 전체 데이터의 평균 기울기(LSB) 계산
-slope, _, _, _, _ = linregress(final_taps, final_times)
-global_lsb_ps = slope
+#   tap 0     : 스냅샷 조건(tap[0]==1)상 popcount=0 불가 → 항상 빈 칸
+#   끝단 taps : 딜레이라인(≈5.4ns)이 1주기(5ns)보다 길어 도달 불가
+#   내부 좁은 bin(missing code)은 실제 하드웨어 특성이므로 절대 제거하지 않음.
+nz = counts_full[counts_full > 0]
+if nz.size == 0:
+    print("❌ 유효한 데이터가 없습니다.")
+    exit()
 
-# 2) 보간 함수 생성 (외삽 끄기)
-interp_func = interp1d(final_taps, final_times, kind='linear')
-
-min_meas_tap = np.min(final_taps)
-max_meas_tap = np.max(final_taps)
-time_at_min_tap = final_times[np.argmin(final_taps)]
-time_at_max_tap = final_times[np.argmax(final_taps)]
-
-target_taps = np.arange(NUM_TOTAL_TAPS)
-calibrated_abs_time = np.zeros(NUM_TOTAL_TAPS)
-
-# 3) 구간별로 나누어서 시간 계산
-for i, tap in enumerate(target_taps):
-    if tap < min_meas_tap:
-        # 왼쪽 끝단 연장
-        calibrated_abs_time[i] = time_at_min_tap - (min_meas_tap - tap) * global_lsb_ps
-    elif tap > max_meas_tap:
-        # 오른쪽 끝단 연장
-        calibrated_abs_time[i] = time_at_max_tap + (tap - max_meas_tap) * global_lsb_ps
-    else:
-        # 내부 구간 보간
-        calibrated_abs_time[i] = interp_func(tap)
-
-# 0번 탭을 0ps로 정렬 및 음수 방지
-calibrated_abs_time = calibrated_abs_time - calibrated_abs_time[0]
-calibrated_abs_time = np.clip(calibrated_abs_time, 0, None)
+thresh = nz.mean() * EDGE_TRIM_FRAC
+lo = 0
+while lo < NUM_TOTAL_TAPS and counts_full[lo] < thresh:
+    lo += 1
+hi = NUM_TOTAL_TAPS - 1
+while hi > lo and counts_full[hi] < thresh:
+    hi -= 1
 
 # =========================================================================
-# 3. 양자화(Rounding) 및 COE 파일 생성 (주석 완전 제거)
+# 3. Cumulative Code-Density LUT 계산
 # =========================================================================
-lut_integers = np.round(calibrated_abs_time).astype(int)
+#   위상 스윕이 한 주기를 균일하게 훑으므로 h[i] ∝ bin 폭.
+#   LUT[i] = (T/H) * ( Σ_{k<i} h[k] + h[i]/2 )      ← bin 중심(양자화 오차 최소)
+h = counts_full[lo:hi + 1]
+H = h.sum()
+
+cum_before = np.concatenate([[0.0], np.cumsum(h)[:-1]])   # Σ_{k<i} h[k]
+lut_valid  = T_PERIOD_PS / H * (cum_before + h / 2.0)      # 유효 구간의 ps 값
+
+# 전체 320칸 배열로 확장
+lut_ps = np.zeros(NUM_TOTAL_TAPS, dtype=float)
+lut_ps[lo:hi + 1] = lut_valid
+lut_ps[:lo]       = 0.0                # tap 0 등 진입 전 (호출 안 됨)
+lut_ps[hi + 1:]   = lut_valid[-1]      # 미도달 끝단 → 마지막 유효값 유지(단조성 보존)
+
+# 단조 비감소 보장 (통계 노이즈로 인한 역전 방지) 후 양자화
+lut_ps = np.maximum.accumulate(lut_ps)
+lut_int = np.clip(np.round(lut_ps), 0, ROM_MAX_VALUE).astype(int)
+
+# =========================================================================
+# 4. COE 파일 생성 (radix 10, 320줄, 주석 없음)
+# =========================================================================
 coe_filepath = os.path.join(script_dir, "tdc_calib_mode0_rom.coe")
-
 with open(coe_filepath, "w") as f:
     f.write("memory_initialization_radix=10;\n")
     f.write("memory_initialization_vector=\n")
-    for i, val in enumerate(lut_integers):
-        end_char = ";" if i == len(lut_integers) - 1 else ",\n"
-        # ★ 주석(# Tap i)을 제거하고 숫자와 구분자만 출력
-        f.write(f"{val}{end_char}")
-
-print(f"✅ 성공: 주석이 제거된 COE 파일 생성 완료 -> {coe_filepath}")
+    for i, val in enumerate(lut_int):
+        f.write(f"{val}" + (";" if i == len(lut_int) - 1 else ",\n"))
 
 # =========================================================================
-# 4. 결과 시각화 (확인용)
+# 5. 검증 로그
 # =========================================================================
-plt.figure(figsize=(10, 6))
+diffs = np.diff(lut_int[lo:hi + 1])
+print("\n" + "=" * 55)
+print(" 🔧 MODE 0 CODE-DENSITY CALIBRATION LUT")
+print("=" * 55)
+print(f" 유효 구간      : tap {lo} ~ {hi} ({hi - lo + 1} bins)")
+print(f" 총 히트 H      : {int(H):,}")
+print(f" LUT 범위       : {lut_int[lo]} ~ {lut_int[hi]} ps  (목표 0~{int(T_PERIOD_PS)})")
+print(f" 단조 증가      : {'OK' if np.all(diffs >= 0) else '❌ 역전 존재'}")
+print(f" 13비트 이내    : {'OK' if lut_int.max() <= ROM_MAX_VALUE else '❌ 초과'}")
+print(f" 최대 step(폭)  : {diffs.max()} ps (tap {lo + int(np.argmax(diffs))})")
+print(f" 최소 step(폭)  : {diffs.min()} ps  ← 0이면 missing code")
+print(f" ROM 라인 수    : {len(lut_int)} (필요 {NUM_TOTAL_TAPS})")
+print("-" * 55)
+print(f" ✅ COE 저장    : {os.path.basename(coe_filepath)}")
+print("=" * 55 + "\n")
 
-plt.scatter(final_taps, final_times - final_times[0], color='#3b82f6', alpha=0.7, s=20, label='User Processed Raw Data')
-plt.plot(target_taps, calibrated_abs_time, color='#ef4444', linewidth=2, linestyle='--', label=f'Interpolated & Extrapolated (Slope: {global_lsb_ps:.2f})')
-
-plt.title("Mode 0: Final TDC Calibration LUT Generation", fontsize=14, fontweight='bold')
-plt.xlabel("TDC Fine Index (Tap 0 ~ 319)", fontsize=12)
-plt.ylabel("Absolute Delay Time (ps)", fontsize=12)
-plt.grid(True, linestyle='--', alpha=0.6)
+# =========================================================================
+# 6. 시각화 (확인용)
+# =========================================================================
+taps = np.arange(NUM_TOTAL_TAPS)
+plt.figure(figsize=(11, 6))
+plt.step(taps, lut_int, where='post', color='#ef4444', linewidth=1.5,
+         label='Calibration LUT (cumulative code density)')
+ideal = np.linspace(lut_int[lo], lut_int[hi], hi - lo + 1)
+plt.plot(np.arange(lo, hi + 1), ideal, color='#3b82f6', ls='--', lw=1.2,
+         label='Ideal linear ramp')
+plt.title("Mode 0: Code-Density Calibration LUT", fontsize=14, fontweight='bold')
+plt.xlabel("TDC Fine Index (Tap)", fontsize=12)
+plt.ylabel("Calibrated time before edge (ps)", fontsize=12)
+plt.grid(True, ls='--', alpha=0.6)
 plt.legend()
 plt.tight_layout()
+plt.savefig(os.path.join(script_dir, "calib_lut_mode0.png"), dpi=150)
 plt.show()
