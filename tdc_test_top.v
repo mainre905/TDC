@@ -237,16 +237,31 @@ module tdc_test_top #(
     assign led[3] = final_ts_valid; 
 
     // ==========================================================
-    // 7. ILA (Integrated Logic Analyzer) 갱신
+    // 7. ILA (Integrated Logic Analyzer)
     // ==========================================================
+    // [현재 모드] 캘리브레이션 검증용 timestamp 캡처
+    //   목적: COE 적용 전(선형 COE)/후(code-density COE)를 '동일한 ILA·동일한 분석'으로 비교.
+    //         측정값 = final_timestamp_ps, 참 시간 기준 = current_loop_cnt(위상 스텝).
+    //   분석: fine = (-timestamp) mod 5000  →  fine vs loop_cnt 선형성(DNL/INL).
+    //   ★ ila_0 IP를 재구성할 것: probe2 폭 32 → 48비트 (final_timestamp_ps[47:0] 수용).
+    //     나머지 probe 폭(1/9/9/9)은 그대로.
     ila_0 your_ila_instance (
-        .clk    (tdc_clk), 
-        .probe0 (readout_active),       // [0:0] Trigger Setup에 넣고 '1'로 설정
-        // ★ probe1은 반드시 probe_read_addr가 아닌 probe_read_addr_d1을 연결할 것.
-        //   BRAM read latency(1클럭) 때문에 지연되지 않은 주소를 쓰면 X축이 Y축보다 1 앞서 밀립니다.
-        .probe1 (probe_read_addr_d1),   // [8:0] X축: Tap 번호 (histo_read_data와 정렬됨)
-        .probe2 (histo_read_data),      // [31:0] Y축: 카운트 값
-        .probe3 (current_loop_cnt),     // [8:0]
-        .probe4 (aligned_fine_idx)      // [8:0]
+        .clk    (tdc_clk),
+        .probe0 (final_ts_valid),            // [0:0]  Trigger: '1' (유효 히트마다)
+        .probe1 (aligned_fine_idx),          // [8:0]  raw tap (참고)
+        .probe2 (final_timestamp_ps[47:0]),  // [47:0] 측정 출력 (상위 비트는 항상 0이라 생략)
+        .probe3 (current_loop_cnt),          // [8:0]  위상 스텝 = 참 시간 기준
+        .probe4 (aligned_fine_idx)           // [8:0]  (여분)
     );
+
+    // [보존] 히스토그램(code density) 캡처용 — COE 생성 시 이 설정으로 되돌릴 것.
+    //        되돌릴 때 ila_0 IP의 probe2 폭도 48 → 32로 다시 바꿔야 함.
+    // ila_0 your_ila_instance (
+    //     .clk    (tdc_clk),
+    //     .probe0 (readout_active),       // [0:0]
+    //     .probe1 (probe_read_addr_d1),   // [8:0] X축: Tap 번호 (histo_read_data와 정렬됨)
+    //     .probe2 (histo_read_data),      // [31:0] Y축: 카운트 값
+    //     .probe3 (current_loop_cnt),     // [8:0]
+    //     .probe4 (aligned_fine_idx)      // [8:0]
+    // );
 endmodule

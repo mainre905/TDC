@@ -17,7 +17,7 @@ EDGE_TRIM_FRAC = 0.05      # 유효 구간 양 끝단 컷 (평균의 5% 미만)
 
 # cal/val 분리 (같은 빌드의 독립 측정 → 순환논리 회피)
 CAL_CSV = "tap_histogram_20260719_160115.csv"   # LUT(교정) 생성용
-VAL_CSV = "tap_histogram_20260719_155155.csv"   # 평가용
+VAL_CSV = "tap_histogram_20260719_165952.csv"   # 평가용
 
 # AFTER 출력 격자 수. None이면 유효 code 수와 동일(=LSB 유지). 작게 주면 bin merging(해상도↓, DNL↑개선).
 M_OUT = None
