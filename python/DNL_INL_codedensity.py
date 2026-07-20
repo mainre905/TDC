@@ -7,7 +7,8 @@ import matplotlib.pyplot as plt
 # =========================================================================
 # 0. 설정
 # =========================================================================
-# DPS(Dynamic Phase Shift, Mode 0) 방식 TDC 캘리브레이션 전/후 DNL·INL 비교.
+# Code-Density 방식 TDC 캘리브레이션 전/후 DNL·INL 비교 (Mode 0 DPS / Mode 1 Ring Osc 공용).
+#   자극 방식 무관 — tap 히스토그램(Tap_Index, Hit_Count)만 받아 code density로 계산.
 #   BEFORE : raw code density  (각 tap 히트수 ∝ bin 폭)
 #   AFTER  : Method B — cal LUT의 누적 시간축 위에서 val 히트를 균일 격자로
 #            fractional re-binning (bin merging/interpolation). DNL·INL 개선.
@@ -16,8 +17,8 @@ NUM_TOTAL_TAPS = 320
 EDGE_TRIM_FRAC = 0.05      # 유효 구간 양 끝단 컷 (평균의 5% 미만)
 
 # cal/val 분리 (같은 빌드의 독립 측정 → 순환논리 회피)
-CAL_CSV = "tap_histogram_20260719_160115.csv"   # LUT(교정) 생성용
-VAL_CSV = "tap_histogram_20260719_165952.csv"   # 평가용
+CAL_CSV = "tap_histogram_20260720_191308.csv"   # LUT(교정) 생성용
+VAL_CSV = "tap_histogram_20260720_195432.csv"   # 평가용
 
 # AFTER 출력 격자 수. None이면 유효 code 수와 동일(=LSB 유지). 작게 주면 bin merging(해상도↓, DNL↑개선).
 M_OUT = None
@@ -115,7 +116,7 @@ def pp(x):
     return float(np.max(x) - np.min(x))
 
 print("\n" + "=" * 60)
-print(" 📊 DPS(Mode 0) 캘리브레이션 전/후 DNL·INL")
+print(" 📊 Code-Density 캘리브레이션 전/후 DNL·INL")
 print("=" * 60)
 print(f" 유효 구간   : tap {lo}~{hi} ({N} bins)   raw LSB = {LSB:.3f} ps")
 print(f" AFTER 격자  : {M} bins   LSB_B = {LSB_B:.3f} ps")
@@ -163,7 +164,7 @@ for a in ax.flat:
     a.axhline(0, color='black', lw=0.8, ls='--')
     a.grid(True, ls='--', alpha=0.5)
 
-plt.suptitle("DPS (Dynamic Phase Shift) TDC Calibration: Before vs After",
+plt.suptitle("Code-Density TDC Calibration: Before vs After",
              fontsize=15, fontweight='bold')
 plt.tight_layout()
 plt.savefig(os.path.join(script_dir, "dnl_inl_dps_compare.png"), dpi=200)

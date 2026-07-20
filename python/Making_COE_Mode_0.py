@@ -17,7 +17,12 @@ ROM_MAX_VALUE  = 8191      # 13비트 상한
 EDGE_TRIM_FRAC = 0.05      # 유효 구간 끝단 컷 (평균의 5% 미만인 양 끝 bin 제거)
 
 # Calibration set: COE를 만들 raw 히스토그램. None이면 가장 최근 파일.
-CAL_CSV = "tap_histogram_20260720_112710.csv"
+CAL_CSV = None   # None이면 가장 최근 tap_histogram_*.csv 자동 선택
+
+# 출력 COE 구분 태그 (DPS vs Ring Osc 비교용 보관 파일명).
+#   → tdc_calib_<SOURCE_TAG>_rom.coe 로 별도 보관.
+#   → 동시에 하드웨어 IP가 참조하는 canonical(tdc_calib_mode0_rom.coe)도 항상 함께 생성.
+SOURCE_TAG = "ringosc"   # 예: "dps"(Mode 0) / "ringosc"(Mode 1)
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -96,12 +101,17 @@ lut_int = np.clip(np.round(lut_ps), 0, ROM_MAX_VALUE).astype(int)
 # =========================================================================
 # 4. COE 파일 생성 (radix 10, 320줄, 주석 없음)
 # =========================================================================
-coe_filepath = os.path.join(script_dir, "tdc_calib_mode0_rom.coe")
-with open(coe_filepath, "w") as f:
-    f.write("memory_initialization_radix=10;\n")
-    f.write("memory_initialization_vector=\n")
-    for i, val in enumerate(lut_int):
-        f.write(f"{val}" + (";" if i == len(lut_int) - 1 else ",\n"))
+#   canonical : 하드웨어 IP가 참조하는 고정 이름 (빌드용, 항상 생성)
+#   tagged    : DPS/RingOsc 구분 보관용 (SOURCE_TAG)
+canonical_coe = os.path.join(script_dir, "tdc_calib_mode0_rom.coe")
+tagged_coe    = os.path.join(script_dir, f"tdc_calib_{SOURCE_TAG}_rom.coe")
+
+for coe_filepath in (canonical_coe, tagged_coe):
+    with open(coe_filepath, "w") as f:
+        f.write("memory_initialization_radix=10;\n")
+        f.write("memory_initialization_vector=\n")
+        for i, val in enumerate(lut_int):
+            f.write(f"{val}" + (";" if i == len(lut_int) - 1 else ",\n"))
 
 # =========================================================================
 # 5. 검증 로그
@@ -119,7 +129,8 @@ print(f" 최대 step(폭)  : {diffs.max()} ps (tap {lo + int(np.argmax(diffs))})
 print(f" 최소 step(폭)  : {diffs.min()} ps  ← 0이면 missing code")
 print(f" ROM 라인 수    : {len(lut_int)} (필요 {NUM_TOTAL_TAPS})")
 print("-" * 55)
-print(f" ✅ COE 저장    : {os.path.basename(coe_filepath)}")
+print(f" ✅ 빌드용(canonical) : {os.path.basename(canonical_coe)}")
+print(f" ✅ 보관용(tagged)    : {os.path.basename(tagged_coe)}")
 print("=" * 55 + "\n")
 
 # =========================================================================
