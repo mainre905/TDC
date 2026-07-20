@@ -17,7 +17,7 @@ ROM_MAX_VALUE  = 8191      # 13비트 상한
 EDGE_TRIM_FRAC = 0.05      # 유효 구간 끝단 컷 (평균의 5% 미만인 양 끝 bin 제거)
 
 # Calibration set: COE를 만들 raw 히스토그램. None이면 가장 최근 파일.
-CAL_CSV = "tap_histogram_20260719_160115.csv"
+CAL_CSV = "tap_histogram_20260720_112710.csv"
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 

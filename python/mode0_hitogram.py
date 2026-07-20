@@ -1,56 +1,98 @@
 import os
-import pandas as pd
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 
-# 1. 파일 경로 설정 (요청하신 코드 완벽 반영)
+# ==========================================
+# 1. 파일 경로 설정 및 데이터 로드
+# ==========================================
 script_dir = os.path.dirname(os.path.abspath(__file__))
-csv_filepath = os.path.join(script_dir, "iladata.csv")  # 저장하신 파일명과 일치시켜주세요
+csv_filepath = os.path.join(script_dir, "histo.csv")
 
-print(f"Loading data from: {csv_filepath}")
-
-# 2. CSV 파일 불러오기 
-# Vivado ILA CSV의 두 번째 줄(Radix 선언부)은 데이터가 아니므로 건너뜁니다 (skiprows=[1])
+print(f"히스토그램 데이터 로드 중... 경로: {csv_filepath}")
+# ILA에서 내보낸 CSV의 두 번째 줄(UNSIGNED) 무시
 df = pd.read_csv(csv_filepath, skiprows=[1])
 
-# 3. 데이터 필터링 (완벽하게 탭 데이터만 뽑아내기)
-# CSV 구조 기준: 3번째 열=readout_active, 4번째 열=probe_read_addr, 5번째 열=histo_read_data (0-indexed)
-# 에러 방지를 위해 강제로 정수형(int)으로 변환 후 비교합니다.
-active_mask = df.iloc[:, 3].astype(int) == 1
-df_active = df[active_mask].copy()
+# 컬럼명 (Vivado Export 이름에 맞게 수정 필요)
+# probe1 = Tap 번호 (0~319), probe2 = 누적 카운트
+col_tap = 'probe1[8:0]'      
+col_count = 'probe2[31:0]'   
 
-# 혹시 ILA 클럭 타이밍상 같은 주소가 두 번 찍혔을 경우를 대비해 중복 제거
-df_active = df_active.drop_duplicates(subset=df.columns[4])
+tap_idx = df[col_tap].astype(int).values
+counts = df[col_count].astype(float).astype(int).values
 
-# 주소(Tap Index) 순서대로 정렬
-df_active = df_active.sort_values(by=df.columns[4])
+# ==========================================
+# 2. 통계 기반 캘리브레이션 연산 (Code Density)
+# ==========================================
+TOTAL_TIME_PS = 5000.0  # 1 클럭 주기 (200MHz)
+TOTAL_HITS = np.sum(counts)
 
-# X축(Tap 번호)과 Y축(카운트 값) 추출
-tap_indices = df_active.iloc[:, 4].astype(int).values
-counts = df_active.iloc[:, 5].astype(int).values
+print(f" - 분석된 총 탭 수: {len(counts)} Taps")
+print(f" - 누적된 총 Hit 수: {TOTAL_HITS:,} Hits")
 
-print(f"총 {len(tap_indices)}개의 Tap 데이터를 성공적으로 추출했습니다!")
-print(f"전체 누적 Hit 카운트: {np.sum(counts)} 개")
+# 1) 각 탭의 실제 물리적 길이 (Bin Width) 계산
+# 원리: 히트가 많이 쌓인 탭일수록 물리적 길이가 길다.
+actual_tap_width_ps = TOTAL_TIME_PS * (counts / float(TOTAL_HITS))
 
-# 4. 히스토그램 그리기 (막대 그래프)
-plt.figure(figsize=(14, 6))
+# 2) 진짜 DNL (Differential Non-Linearity) 계산
+ideal_tap_width_ps = TOTAL_TIME_PS / len(counts)
+dnl_ps = actual_tap_width_ps - ideal_tap_width_ps
 
-# 바 차트를 사용하여 탭별 카운트를 시각적으로 명확하게 표현
-plt.bar(tap_indices, counts, width=1.0, color='royalblue', edgecolor='black', linewidth=0.5, alpha=0.8)
+# 3) 보정된 절대 시간 (Absolute Time / Calibrated INL) 계산
+# 원리: 이전 탭들의 길이를 모두 누적 더함 + 자기 자신 길이의 절반
+absolute_time_ps = np.zeros(len(counts))
+cumulative_time = 0.0
 
-# 그래프 꾸미기
-plt.title('FPGA TDC Tap Histogram (Code Density Test)', fontsize=16, fontweight='bold')
-plt.xlabel('Tap Index (0 to 319)', fontsize=12)
-plt.ylabel('Hit Counts', fontsize=12)
-plt.xlim(-5, 325)  # 좌우 여백 살짝 확보
+for i in range(len(counts)):
+    absolute_time_ps[i] = cumulative_time + (actual_tap_width_ps[i] / 2.0)
+    cumulative_time += actual_tap_width_ps[i]
 
-# 평균 카운트 선 긋기 (논문에서 Reference Line으로 활용하기 좋음)
-average_count = np.mean(counts)
-plt.axhline(y=average_count, color='red', linestyle='--', linewidth=2, label=f'Average ({average_count:.1f})')
-plt.legend()
+# ==========================================
+# 3. 보정용 COE 파일 자동 생성
+# ==========================================
+coe_filepath = os.path.join(script_dir, "calibrated_rom.coe")
 
-plt.grid(axis='y', linestyle='--', alpha=0.7)
+# ROM 512번지를 꽉 채우기 위해 빈 공간은 0으로 패딩하거나 선형 증가시킴
+with open(coe_filepath, "w") as f:
+    f.write("memory_initialization_radix=10;\n")
+    f.write("memory_initialization_vector=\n")
+    
+    for i in range(512):
+        if i < len(counts):
+            val = int(round(absolute_time_ps[i]))
+        else:
+            # 320번 탭 이후 (사용 안함)는 그냥 선형적으로 증가하는 더미 값
+            val = int(round(cumulative_time + (i - len(counts)) * ideal_tap_width_ps))
+            
+        if i == 511:
+            f.write(f"{val};\n")
+        else:
+            f.write(f"{val},\n")
+
+print(f"\n✅ 캘리브레이션 완료! [{coe_filepath}] 파일이 생성되었습니다.")
+print("이 파일을 Vivado ROM IP에 넣고 재합성 하세요.")
+
+# ==========================================
+# 4. 분석 결과 그래프 (진짜 DNL / INL)
+# ==========================================
+plt.figure(figsize=(12, 8))
+
+# 진짜 DNL 그래프 (물리적 탭 불균일성)
+plt.subplot(2, 1, 1)
+plt.plot(tap_idx, dnl_ps, 'b-', alpha=0.7)
+plt.fill_between(tap_idx, dnl_ps, 0, color='blue', alpha=0.3)
+plt.axhline(0, color='r', linestyle='--')
+plt.title('True DNL (Differential Non-Linearity) from Histogram')
+plt.ylabel('DNL Error (ps)')
+plt.grid(True)
+
+# 탭 폭에 따른 절대 시간 곡선 (COE 파일에 들어갈 내용)
+plt.subplot(2, 1, 2)
+plt.plot(tap_idx, absolute_time_ps, 'g.-')
+plt.title('Calibrated Absolute Time Transfer Curve (COE Data)')
+plt.xlabel('TDC Tap Index (0 ~ 319)')
+plt.ylabel('Absolute Time (ps)')
+plt.grid(True)
+
 plt.tight_layout()
-
-# 화면에 출력
 plt.show()

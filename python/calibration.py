@@ -1,128 +1,107 @@
 import os
-import matplotlib.pyplot as plt
 import numpy as np
+import matplotlib.pyplot as plt
 import pandas as pd
-import platform
 
-# =========================================================================
-# 0. 한글 폰트 및 설정
-# =========================================================================
-if platform.system() == 'Windows':
-    plt.rcParams['font.family'] = 'Malgun Gothic'
-elif platform.system() == 'Darwin':
-    plt.rcParams['font.family'] = 'AppleGothic'
-else:
-    plt.rcParams['font.family'] = 'NanumGothic'
-plt.rcParams['axes.unicode_minus'] = False
-
-PHASE_STEP_PS = 1000.0 / 56.0  
-
+# ==========================================
+# 1. 파일 경로 설정 및 데이터 로드
+# ==========================================
 script_dir = os.path.dirname(os.path.abspath(__file__))
-csv_filepath = os.path.join(script_dir, 'iladata.csv')
+csv_filepath = os.path.join(script_dir, "iladata.csv")
 
+print(f"데이터를 불러오는 중... 경로: {csv_filepath}")
+# 두 번째 줄(UNSIGNED 등)을 건너뛰고 로드
 df = pd.read_csv(csv_filepath, skiprows=[1])
-df.columns = [c.strip().split("[")[0] for c in df.columns]
 
-# 하드웨어 신호 자동 매핑
-target_keywords = {"valid": "final_ts_valid", "fine": "aligned_fine_idx", "loop": "current_loop_cnt"}
-mapped_cols = {}
-for key, keyword in target_keywords.items():
-    found_col = next((c for c in df.columns if keyword in c), None)
-    if found_col is None:
-        print(f"❌ 에러: CSV에서 '{keyword}' 신호를 찾을 수 없습니다!")
-        exit()
-    mapped_cols[key] = found_col
+# ILA CSV의 실제 컬럼명 (필요시 CSV 헤더에 맞게 수정하세요)
+col_loop = 'current_loop_cnt[8:0]'
+col_time = 'final_timestamp_ps[47:0]'
 
-COL_VALID, COL_FINE, COL_LOOP = mapped_cols["valid"], mapped_cols["fine"], mapped_cols["loop"]
+# 지수 형태 문자열 방어: float 거쳐서 int로 변환
+loop_cnt = df[col_loop].astype(float).astype(int).values
+timestamp_ps = df[col_time].astype(float).astype(int).values
 
-for col in [COL_VALID, COL_FINE, COL_LOOP]:
-    df[col] = pd.to_numeric(df[col], errors="coerce")
+# ==========================================
+# 2. Coarse 시간 제거 (Modulo 5000)
+# ==========================================
+fine_time_ps = timestamp_ps % 5000
 
-df_valid = df.dropna(subset=[COL_FINE, COL_LOOP]).copy()
-df_valid = df_valid[df_valid[COL_VALID] == 1]
+# ==========================================
+# 3. Wrap-around 펴기 (Unwrapping)
+# ==========================================
+unwrapped_time = np.copy(fine_time_ps).astype(float)
+offset = 0
 
-# =========================================================================
-# [핵심 1] 조각 이어붙이기 폐기 -> 가장 긴 '골든 청크(Golden Chunk)' 추출
-# =========================================================================
-grouped = df_valid.groupby(COL_LOOP)[COL_FINE].mean().reset_index()
-grouped['tap_idx'] = np.round(grouped[COL_FINE]).astype(int)
-grouped['raw_time_ps'] = grouped[COL_LOOP] * PHASE_STEP_PS
+for i in range(1, len(unwrapped_time)):
+    diff = fine_time_ps[i] - fine_time_ps[i-1]
+    if diff < -2500:
+        offset += 5000
+    elif diff > 2500:
+        offset -= 5000
+    unwrapped_time[i] += offset
 
-taps = grouped['tap_idx'].values
-times = grouped['raw_time_ps'].values
+# ==========================================
+# 4. 이상적인 선형성(Ideal Line) 계산
+# ==========================================
+coef = np.polyfit(loop_cnt, unwrapped_time, 1) # 1차 방정식 피팅
+ideal_line = np.polyval(coef, loop_cnt)
 
-# 탭 번호가 50 이상 뚝 떨어지는 곳(랩어라운드 발생)을 기준으로 데이터를 나눔
-split_indices = np.where(np.diff(taps) < -50)[0] + 1
-segments = np.split(np.arange(len(taps)), split_indices)
+# ==========================================
+# 5. INL (Integral Non-Linearity) 오차 도출
+# ==========================================
+inl_ps = unwrapped_time - ideal_line
 
-# 가장 데이터가 많은 연속 구간(Golden Chunk) 찾기
-longest_seg_indices = max(segments, key=len)
+# ==========================================
+# ★ 6. 터미널 출력 (분석용 데이터) ★
+# ==========================================
+print("\n" + "="*50)
+print(" 📊 TDC INL Analysis Results (Before Cal) ")
+print("="*50)
+print(f" - Valid Capture Points : {len(loop_cnt)} / 280 steps")
+print(f" - Max INL Error        : {np.max(inl_ps):.2f} ps")
+print(f" - Min INL Error        : {np.min(inl_ps):.2f} ps")
+print(f" - Peak-to-Peak Error   : {np.max(inl_ps) - np.min(inl_ps):.2f} ps")
+print(f" - Std Dev (RMS Error)  : {np.std(inl_ps):.2f} ps")
+print("-" * 50)
+print(" Raw INL Data for Analysis (Loop_cnt, INL_ps):")
+print("-" * 50)
 
-# 양끝에서 발생하는 고스트 탭(노이즈)을 수학적으로 완벽히 잘라내기 위해 앞뒤 2개씩 버림
-golden_indices = longest_seg_indices[2:-2]
+# 콤마로 구분하여 출력 (채팅창에 복사하기 좋도록)
+out_str = []
+for l, i in zip(loop_cnt, inl_ps):
+    out_str.append(f"{l}:{i:.2f}")
 
-golden_taps = taps[golden_indices]
-golden_times = times[golden_indices]
+# 5개씩 묶어서 가독성 좋게 출력
+for i in range(0, len(out_str), 5):
+    print(", ".join(out_str[i:i+5]))
+print("="*50 + "\n")
 
-# 같은 탭 번호에서 미세한 노이즈가 있을 수 있으니 평균으로 깔끔하게 정리
-clean_df = pd.DataFrame({'tap': golden_taps, 'time': golden_times})
-clean_df = clean_df.groupby('tap')['time'].mean().reset_index()
+# ==========================================
+# 7. 결과 그래프 출력
+# ==========================================
+plt.figure(figsize=(12, 8))
 
-final_taps = clean_df['tap'].values
-final_times = clean_df['time'].values
+plt.subplot(2, 1, 1)
+plt.plot(loop_cnt, unwrapped_time, 'b.-', label='Measured (Uncalibrated)')
+plt.plot(loop_cnt, ideal_line, 'r--', label='Ideal Linear Trend')
+plt.title('Absolute Time Transfer Curve (Before Calibration)')
+plt.ylabel('Time (ps)')
+plt.legend()
+plt.grid(True)
 
-# =========================================================================
-# [핵심 2] 선형 외삽법 (Extrapolation) 및 LUT 생성
-# =========================================================================
-def extrapolate_interp(target_x, xp, yp):
-    # 정렬 및 보간
-    idx = np.argsort(xp)
-    xp, yp = xp[idx], yp[idx]
-    y = np.interp(target_x, xp, yp)
-    
-    # 우측 연장 (측정된 마지막 5개 탭의 기울기를 이어감)
-    slope_right = (yp[-1] - yp[-5]) / (xp[-1] - xp[-5])
-    right_mask = target_x > xp[-1]
-    y[right_mask] = yp[-1] + slope_right * (target_x[right_mask] - xp[-1])
-    
-    # 좌측 연장 (측정된 최초 5개 탭의 기울기를 이어감)
-    slope_left = (yp[4] - yp[0]) / (xp[4] - xp[0])
-    left_mask = target_x < xp[0]
-    y[left_mask] = yp[0] + slope_left * (target_x[left_mask] - xp[0])
-    return y
+plt.subplot(2, 1, 2)
+plt.plot(loop_cnt, inl_ps, 'g.-', label='INL Error')
+plt.axhline(0, color='r', linestyle='--')
+plt.title('INL Error (ps)')
+plt.xlabel('MMCM Loop Count (Phase Step)')
+plt.ylabel('Error (ps)')
 
-target_taps = np.arange(320)
-calibrated_abs_time = extrapolate_interp(target_taps, final_taps, final_times)
+max_inl, min_inl = np.max(inl_ps), np.min(inl_ps)
+plt.text(loop_cnt[0], max_inl * 0.8, f" Max: {max_inl:.1f} ps\n Min: {min_inl:.1f} ps\n P2P: {max_inl-min_inl:.1f} ps", 
+         bbox=dict(facecolor='white', alpha=0.8))
 
-# 하드웨어 로직을 위해 Tap 0번을 무조건 0ps로 정렬 (단조 증가 완성)
-calibrated_abs_time = calibrated_abs_time - calibrated_abs_time[0]
+plt.legend()
+plt.grid(True)
 
-lut_integers = np.round(calibrated_abs_time).astype(int)
-
-# coe 파일 출력
-coe_filepath = os.path.join(script_dir, "tdc_calibration_lut.coe")
-with open(coe_filepath, "w") as f:
-    f.write("memory_initialization_radix=10;\n")
-    f.write("memory_initialization_vector=\n")
-    for i, val in enumerate(lut_integers):
-        f.write(f"{val};\n" if i == len(lut_integers)-1 else f"{val},\n")
-print(f"■ 절벽 제거 완벽 해결! '{coe_filepath}' 파일 생성 완료!")
-
-# =========================================================================
-# 6. 최종 완벽 시각화
-# =========================================================================
-plt.figure(figsize=(14, 7))
-
-plt.plot(final_taps, final_times - final_times[0], 'o', color='#3b82f6', markersize=6, label='Golden Measured Taps')
-plt.plot(target_taps, calibrated_abs_time, '-', color='#10b981', linewidth=2, alpha=0.6, zorder=1, label='Perfect Extrapolated Line')
-
-plt.title("Ultimate TDC Calibration: The Flawless Monotonic Delay Line", fontsize=16, fontweight='bold', pad=15)
-plt.xlabel("TDC Fine Index (Tap)", fontsize=12)
-plt.ylabel("Absolute Time (ps)", fontsize=12)
-plt.grid(True, linestyle='--', alpha=0.6)
-plt.legend(loc='lower right', fontsize=11)
 plt.tight_layout()
-
-png_filepath = os.path.join(script_dir, "flawless_straight_line.png")
-plt.savefig(png_filepath, dpi=300)
 plt.show()

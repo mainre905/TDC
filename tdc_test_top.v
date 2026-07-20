@@ -6,7 +6,7 @@ module tdc_test_top #(
     // 1 : Hit = Ring Osc(랜덤)   | Clock = Fixed 200MHz  (기본 동작 및 탭 누적 테스트용)
     // 2 : Hit = 외부 STM32 신호  | Clock = Fixed 200MHz  (실제 측정용)
     // ==========================================================
-    parameter integer OPERATION_MODE = 0
+    parameter integer OPERATION_MODE = 1
 )(
     input  wire       clk_125, 
     input  wire       rst_n, 
@@ -245,16 +245,55 @@ module tdc_test_top #(
     //   분석: fine = (-timestamp) mod 5000  →  fine vs loop_cnt 선형성(DNL/INL).
     //   ★ ila_0 IP를 재구성할 것: probe2 폭 32 → 48비트 (final_timestamp_ps[47:0] 수용).
     //     나머지 probe 폭(1/9/9/9)은 그대로.
-    ila_0 your_ila_instance (
-        .clk    (tdc_clk),
-        .probe0 (final_ts_valid),            // [0:0]  Trigger: '1' (유효 히트마다)
-        .probe1 (aligned_fine_idx),          // [8:0]  raw tap (참고)
-        .probe2 (final_timestamp_ps[47:0]),  // [47:0] 측정 출력 (상위 비트는 항상 0이라 생략)
-        .probe3 (current_loop_cnt),          // [8:0]  위상 스텝 = 참 시간 기준
-        .probe4 (aligned_fine_idx)           // [8:0]  (여분)
-    );
+    // (1) MMCM 스텝(loop_cnt) 변경 감지 및 단발성 트리거 생성 로직
+    reg [8:0] prev_loop_cnt;
+    reg       capture_arm; // 스텝이 바뀌면 장전(Arm)되는 플래그
 
-    // [보존] 히스토그램(code density) 캡처용 — COE 생성 시 이 설정으로 되돌릴 것.
+    always @(posedge tdc_clk or negedge clk_locked) begin
+        if (!clk_locked) begin
+            prev_loop_cnt <= 9'd0;
+            capture_arm   <= 1'b0;
+        end else begin
+            prev_loop_cnt <= current_loop_cnt;
+            
+            // 스텝 카운트가 증가하는 순간 캡처 준비(Arm)
+            if (current_loop_cnt != prev_loop_cnt) begin
+                capture_arm <= 1'b1;
+            end 
+            // 캡처 준비가 된 상태에서 첫 번째 유효한 데이터가 나오면 트리거 발동 후 장전 해제
+            else if (capture_arm && final_ts_valid) begin
+                capture_arm <= 1'b0; 
+            end
+        end
+    end
+   wire capture_trigger = (capture_arm && final_ts_valid);
+
+   //ila_0 your_ila_instance (
+     //   .clk    (tdc_clk),
+     //   .probe0 (capture_trigger),           // [0:0]  캡처 조건 플래그
+     //   .probe1 (current_loop_cnt),          // [8:0]  X축: 기준 위상 스텝 (0 ~ 279)
+     //   .probe2 (final_timestamp_ps[47:0]),  // [47:0] Y축: TDC가 계산한 절대 시간
+     //   .probe3 (aligned_fine_idx)           // [8:0]  참고용: 캡처된 Raw Tap 번호
+   // );
+     
+     // (2) 통합 ILA 인스턴스 (Depth는 1024 ~ 4096 정도로 넉넉히 설정)
+    ila_0 universal_ila (
+        .clk    (tdc_clk),
+        
+        // --- [INL 측정용 프로브 그룹] ---
+        .probe0 (capture_trigger),           // [0:0]  INL 캡처 조건 (1일 때 캡처)
+        .probe2 (current_loop_cnt),          // [8:0]  INL X축: 스텝 번호
+        .probe3 (final_timestamp_ps[47:0]),  // [47:0] INL Y축: 절대 시간
+        
+        // --- [COE 추출을 위한 히스토그램 프로브 그룹 CODE DENSITY TEST] ---
+        .probe1 (readout_active),            // [0:0]  히스토그램 캡처 조건 (1일 때 캡처)
+        .probe4 (probe_read_addr_d1),        // [8:0]  히스토그램 X축: Tap 인덱스 (0~319)
+        .probe5 (histo_read_data)            // [31:0] 히스토그램 Y축: 누적 카운트 값
+    );
+  
+
+
+    // [보존] 히스토그램(code density) 캡처용 - COE 생성 시 이 설정으로 되돌릴 것.
     //        되돌릴 때 ila_0 IP의 probe2 폭도 48 → 32로 다시 바꿔야 함.
     // ila_0 your_ila_instance (
     //     .clk    (tdc_clk),
