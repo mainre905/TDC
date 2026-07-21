@@ -1,5 +1,11 @@
 # Mode 1 (Ring Oscillator) 캘리브레이션 — 진행 정리
 
+> **작성일** 2026-07-21
+> **작성** Claude Opus 4.8 (Claude Code) — 사용자와의 대화 및 검토를 거쳐 생성
+> **근거** 2026-07-20 실측 히스토그램(`tap_histogram_20260720_191308 / _195432`),
+> RTL 소스 분석(`tdc_fmcw_core.v`, `tdc_histogram.v`, `tdc_test_top.v`)
+> **주의** AI가 생성한 문서입니다. 수치·절차는 사용 전 실제 코드/측정과 대조하십시오.
+
 TDC 딜레이라인을 **링발진기(비동기 랜덤 hit)** 로 특성화하고, 캘리브레이션 전/후
 DNL·INL을 code density로 비교한다. Mode 0(DPS)과 **같은 딜레이라인**을 다른 자극으로 측정.
 

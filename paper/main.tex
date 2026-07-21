@@ -1,0 +1,646 @@
+\documentclass[journal]{IEEEtran}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{cite}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{url}
+\usepackage[dvipsnames]{xcolor}
+
+% =====================================================================
+% Drafting helpers. To remove all placeholder marks in the final version,
+% redefine them as no-ops:
+%   \renewcommand{\needdata}[1]{}
+%   \renewcommand{\needfig}[1]{}
+%
+%   \needdata{...} : a number that still has to be measured
+%   \needfig{...}  : a figure slot; replace with \includegraphics later
+%
+% NOTE: keep this file pure ASCII. pdfLaTeX with IEEEtran cannot typeset
+% Hangul; adding non-ASCII text here causes "Unicode character not set up"
+% errors.
+% =====================================================================
+\newcommand{\needdata}[1]{{\color{red}\textbf{[DATA NEEDED: #1]}}}
+\newcommand{\needfig}[1]{%
+  \fbox{\parbox{0.45\textwidth}{\vspace{1.2cm}\centering
+  {\color{red}\textbf{[FIGURE NEEDED]}}\\[4pt] #1 \vspace{1.2cm}}}}
+
+\begin{document}
+
+\title{FPGA-Based Time-to-Digital Converter with Dual-Phase Coarse
+Timestamping and Stimulus-Independent Code-Density Calibration}
+
+\author{Donghyun~Sung, Junki~Lee, and~Kyungtae~Lee}
+
+\maketitle
+
+% =====================================================================
+\begin{abstract}
+This paper presents a carry-chain time-to-digital converter (TDC)
+implemented on a Xilinx Zynq-7000 FPGA for FMCW radar applications, together
+with a systematic characterization and calibration methodology.
+The delay line consists of 80 cascaded CARRY4 primitives providing 320 taps,
+of which 294 codes are reachable within one 5\,ns clock period, yielding an
+average bin width of 17.0\,ps.
+A dual-phase coarse counter driven by $0^{\circ}$ and $180^{\circ}$ clocks
+resolves coarse-timestamp ambiguity near the sampling edge.
+We quantify two structural sources of nonlinearity that dominate the raw
+transfer function: an intra-CARRY4 period-four bin-width pattern spanning a
+$3.72\times$ range, and an entry transient at the chain input caused by
+driving the first carry stage through the general-routing \texttt{CYINIT} pin
+rather than the dedicated carry input.
+Calibration is performed by a code-density test, and we compare two
+independent stimuli---MMCM dynamic phase shifting (deterministic) and an
+on-chip ring oscillator (statistical)---under a strict
+calibration/validation split in which the correction table is derived from
+one acquisition and evaluated on a statistically independent one.
+With the ring-oscillator stimulus, peak-to-peak DNL improves from
+4.03\,LSB to 0.11\,LSB and INL from 8.55\,LSB to 0.17\,LSB at unchanged
+resolution.
+Finally, we formulate and test a \emph{shape-invariance} hypothesis, namely
+that the relative bin-width pattern is temperature invariant while only the
+overall delay scale drifts, which---if valid---reduces online thermal
+compensation to a single scalar correction.
+\end{abstract}
+
+\begin{IEEEkeywords}
+FPGA, time-to-digital converter, carry chain, code density test,
+dynamic phase shift, ring oscillator, calibration, temperature drift.
+\end{IEEEkeywords}
+
+% =====================================================================
+\section{Introduction}
+
+Time-to-digital converters (TDCs) are essential in FMCW radar, LiDAR,
+positron emission tomography, and time-of-flight imaging. Modern FPGAs expose
+dedicated carry-chain resources that permit tapped-delay-line (TDL) TDCs with
+picosecond resolution at low development cost~\cite{song,wu,charbon}.
+
+Practical FPGA TDL-TDCs are limited by (i) metastability when a hit arrives
+near the sampling edge, (ii) strong bin-width nonuniformity arising from the
+carry-chain layout, and (iii) process--voltage--temperature (PVT) drift of the
+cell delay.
+
+\subsection{Related Work and Positioning of This Work}
+
+The individual techniques used here are established, and we state their
+provenance explicitly.
+Dual coarse counters clocked on opposite edges, with the fine code selecting
+which counter to use, are a known solution to coarse-timestamp
+metastability in TDC ASICs~\cite{atlasmdt}.
+Code-density (statistical) calibration driven by an uncorrelated on-chip ring
+oscillator is likewise standard~\cite{calibreview,wang19ps}.
+MMCM dynamic phase shifting has been used to generate picosecond-scale
+reference intervals for characterizing carry-chain TDCs~\cite{sensors2026}.
+Online compensation of temperature and voltage drift by monitoring the
+frequency of an on-chip ring oscillator and rescaling the delay-line
+calibration was demonstrated by Bourdeauducq~\cite{bourdeauducq}.
+
+Accordingly, this work does not claim these mechanisms as new. Our
+contribution is a measurement-driven characterization and a methodological
+framework built on them:
+
+\begin{enumerate}
+\item \textbf{Quantitative structural characterization} of a Zynq-7000
+carry-chain delay line, separating two distinct nonlinearity mechanisms:
+an intra-CARRY4 period-four pattern ($3.72\times$ bin-width range) and an
+input \emph{entry transient} localized to the first three CARRY4 blocks and
+attributable to \texttt{CYINIT} general-routing injection.
+\item \textbf{Stimulus-independent calibration methodology.} Two physically
+different stimuli (MMCM phase sweep and ring oscillator) are compared under a
+calibration/validation split, so that the reported post-calibration
+nonlinearity is a generalization error rather than a self-consistency
+artifact.
+\item \textbf{Shape-invariance hypothesis for online thermal compensation.}
+Prior online schemes rescale the calibration by a single
+ring-oscillator-derived factor~\cite{bourdeauducq}, but to our knowledge the
+underlying premise---that the \emph{relative} bin-width pattern is temperature
+invariant---has not been verified experimentally. We define the hypothesis and
+a test for it.
+\item An FPGA implementation and evaluation targeted at FMCW radar.
+\end{enumerate}
+
+% =====================================================================
+\section{TDC Architecture}
+
+\subsection{Overall Architecture}
+
+Fig.~\ref{fig:overall} shows the system. A hit propagates along a carry chain
+whose state is sampled by the system clock; the number of propagated taps
+gives the fine time, while a coarse counter provides the clock-cycle index.
+
+\begin{figure}[htbp]
+\centering
+\needfig{Overall block diagram.\\
+Source: export \texttt{diagram/tdc\_system\_block.drawio} to PDF.}
+\caption{Overall architecture of the proposed TDC.}
+\label{fig:overall}
+\end{figure}
+
+\subsection{Carry-Chain Delay Line}
+
+The delay line uses 80 cascaded CARRY4 primitives placed on a single slice
+column by explicit \texttt{LOC}/\texttt{BEL} constraints, giving
+\begin{equation}
+N_{\mathrm{tap}} = 80 \times 4 = 320 .
+\end{equation}
+The chain is deliberately made longer than one sampling period so that the
+full $T_{\mathrm{clk}}=5$\,ns is covered with margin; consequently only a
+subset of taps is reachable (Section~\ref{sec:char}).
+
+\subsection{Fine-Time Extraction}
+
+The fine code is obtained by a population count over all sampled taps,
+\begin{equation}
+C_{\mathrm{fine}} = \sum_{i=0}^{319} \mathrm{Tap}_i ,
+\qquad \mathrm{Tap}_i \in \{0,1\},
+\end{equation}
+which is inherently immune to bubbles in the thermometer code and avoids a
+priority encoder. The population count is pipelined as a three-level adder
+tree to close timing at 200\,MHz.
+
+Because a measurement is only initiated when $\mathrm{Tap}_0=1$, the code
+$C_{\mathrm{fine}}=0$ is structurally unreachable; the usable code range
+therefore begins at unity.
+
+\subsection{Timestamp Reconstruction}
+
+The absolute timestamp is
+\begin{equation}
+T_{\mathrm{abs}} = N_{\mathrm{clk}}\,T_{\mathrm{clk}} - T_{\mathrm{fine}},
+\qquad
+T_{\mathrm{fine}} = \mathrm{LUT}\!\left(C_{\mathrm{fine}}\right),
+\end{equation}
+where the fine time is subtracted because a larger fine code corresponds to an
+earlier arrival relative to the sampling edge. The LUT is a 320-entry,
+13-bit on-chip ROM applied in the datapath, so calibrated timestamps are
+produced at full rate without post-processing.
+
+% =====================================================================
+\section{Dual-Phase Coarse Timestamping}
+
+\subsection{Problem}
+
+When a hit arrives close to the sampling edge, the coarse counter may be
+captured mid-transition, producing an error of one full clock period, which is
+far larger than the fine-time resolution.
+
+\begin{figure}[htbp]
+\centering
+\needfig{Timing diagram: metastable region near the clock edge.}
+\caption{Coarse-timestamp ambiguity near a clock boundary.}
+\label{fig:meta}
+\end{figure}
+
+\subsection{Implementation}
+
+Following the dual-counter principle of~\cite{atlasmdt}, two counters are
+maintained: one clocked on the rising ($0^{\circ}$) edge and one on the
+falling ($180^{\circ}$) edge, the latter resynchronized into the primary
+domain. The fine code selects which counter is trustworthy, since the fine
+code directly indicates the position of the hit within the clock period.
+
+A danger zone is declared when
+\begin{equation}
+C_{\mathrm{fine}} < T_L \quad\text{or}\quad C_{\mathrm{fine}} > T_H ,
+\end{equation}
+with $T_L=40$ and $T_H=220$ obtained from the measured code distribution, and
+the coarse value is selected as
+\begin{equation}
+N_{\mathrm{clk}}=
+\begin{cases}
+\mathrm{Cnt}_{180}+1, & \text{danger zone},\\[2pt]
+\mathrm{Cnt}_{0}, & \text{otherwise}.
+\end{cases}
+\end{equation}
+Because the two observation points are separated by $T_{\mathrm{clk}}/2$, at
+least one counter is always sampled far from its transition.
+
+\begin{figure}[htbp]
+\centering
+\needfig{Dual-phase coarse timestamping concept:
+$0^{\circ}$/$180^{\circ}$ counters and fine-code-based selection.}
+\caption{Dual-phase coarse timestamping.}
+\label{fig:dual}
+\end{figure}
+
+% =====================================================================
+\section{Delay-Line Characterization}
+\label{sec:char}
+
+This section reports the measured structure of the raw transfer function,
+which motivates the calibration strategy. All results are obtained by a
+code-density test (Section~\ref{sec:cal}).
+
+\subsection{Usable Code Range}
+
+Two boundaries limit the usable range. The code $C_{\mathrm{fine}}=0$ cannot
+occur because the snapshot condition requires $\mathrm{Tap}_0=1$. At the upper
+end, the 320-tap chain spans approximately 5.4\,ns, exceeding the 5\,ns clock
+period, so the highest taps are never reached. The measured usable range is
+therefore
+\begin{equation}
+1 \le C_{\mathrm{fine}} \le 294 ,
+\end{equation}
+i.e.\ 294 codes, giving an average bin width
+\begin{equation}
+W_{\mathrm{LSB}} = \frac{T_{\mathrm{clk}}}{294} = 17.0~\mathrm{ps}.
+\end{equation}
+
+\subsection{Intra-CARRY4 Period-Four Pattern}
+
+Grouping bins by their position within a CARRY4 block, $i \bmod 4$, reveals a
+systematic pattern: the four outputs of a CARRY4 are not equivalent because
+each is tapped at a different point of the internal carry cascade.
+Table~\ref{tab:period4} lists the measured group means.
+
+\begin{table}[htbp]
+\caption{Measured Bin Width by Position within a CARRY4 Block}
+\label{tab:period4}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Position & Mean bin width & Relative to $W_{\mathrm{LSB}}$ \\
+\midrule
+$i \bmod 4 = 0$ & 10.33\,ps & 0.61 \\
+$i \bmod 4 = 1$ & 31.33\,ps & 1.84 \\
+$i \bmod 4 = 2$ & 17.97\,ps & 1.05 \\
+$i \bmod 4 = 3$ & \phantom{0}8.43\,ps & 0.49 \\
+\midrule
+\multicolumn{2}{l}{Widest/narrowest ratio} & $3.72\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\needfig{Scatter of bin count grouped by $i \bmod 4$ (left) and along the
+chain (right).\\ Source: CARRY4 position analysis in \texttt{Histogram.py}.}
+\caption{Intra-CARRY4 bin-width distribution.}
+\label{fig:period4}
+\end{figure}
+
+This pattern is invariant along the chain, confirming that it originates from
+the fixed internal structure of the CARRY4 primitive rather than from
+placement.
+
+\subsection{Entry Transient at the Chain Input}
+
+The first carry stage receives the hit through the general-routing
+\texttt{CYINIT} pin, whereas every subsequent stage receives its carry through
+the dedicated \texttt{CIN} path. The resulting difference in edge quality
+produces a transient localized at the chain input: the measured time consumed
+by the first CARRY4 blocks is $1.89\times$, $1.51\times$ and $1.16\times$ the
+nominal $4W_{\mathrm{LSB}}$, recovering to unity from the fourth block onward.
+This transient is the single largest contributor to peak DNL.
+
+A control experiment confirms that the mechanism is edge quality rather than
+propagation delay: removing a parasitic load from the hit net reduced its
+routing delay from 4227\,ps to 2143\,ps, yet peak-to-peak DNL changed only
+from 4.23\,LSB to 4.20\,LSB. The constant delay offset is therefore
+irrelevant, while the intrinsic \texttt{CYINIT} entry penalty remains.
+
+\begin{figure}[htbp]
+\centering
+\needfig{Per-CARRY4 consumed time versus block index, showing the decay
+$1.89 \rightarrow 1.51 \rightarrow 1.16 \rightarrow 1.00$.}
+\caption{Entry transient at the delay-line input.}
+\label{fig:entry}
+\end{figure}
+
+\subsection{Clock-Region Boundary}
+
+Covering 5\,ns at 200\,MHz requires approximately 74 slice rows, which exceeds
+the 50-row height of a 7-series clock region; the chain therefore necessarily
+crosses a clock-region boundary, in our placement between taps 196 and 200.
+Contrary to expectation, no significant discontinuity was observed at this
+boundary: after removing the period-four component, the normalized deviation
+at the boundary bins was comparable to that of interior bins elsewhere in the
+chain. We conclude that, for this architecture, clock-region crossing is not a
+dominant nonlinearity mechanism.
+
+% =====================================================================
+\section{Code-Density Calibration}
+\label{sec:cal}
+
+\subsection{Principle}
+
+Under a stimulus uniformly distributed over the clock period, the number of
+hits accumulated in bin $i$ is proportional to its width:
+\begin{equation}
+W_i = \frac{H_i}{\sum_k H_k}\, T_{\mathrm{clk}} .
+\end{equation}
+The calibration table stores the cumulative arrival time at the centre of each
+bin,
+\begin{equation}
+\mathrm{LUT}[i] = \frac{T_{\mathrm{clk}}}{H_{\mathrm{tot}}}
+\left( \sum_{k<i} H_k + \frac{H_i}{2} \right),
+\label{eq:lut}
+\end{equation}
+which is monotonic by construction and is quantized to 13 bits for the on-chip
+ROM.
+
+\subsection{Calibration/Validation Split}
+
+Evaluating a calibration on the same acquisition used to derive it is
+self-consistent by construction. We therefore acquire two statistically
+independent histograms, use the first to build \eqref{eq:lut}, and evaluate the
+resulting linearity on the second. Denoting by $H^{\mathrm{val}}$ the
+validation histogram and by $E^{\mathrm{cal}}$ the bin edges implied by the
+calibration histogram, the corrected distribution is obtained by redistributing
+each validation bin over the uniform grid,
+\begin{equation}
+M_k = \sum_i H_i^{\mathrm{val}}\,
+\frac{\left| \left[E^{\mathrm{cal}}_i,E^{\mathrm{cal}}_{i+1}\right)
+\cap B_k \right|}
+{E^{\mathrm{cal}}_{i+1}-E^{\mathrm{cal}}_{i}} ,
+\end{equation}
+where $B_k$ is the $k$-th uniform time bin. The residual nonlinearity of $M_k$
+is thus a generalization error.
+
+\subsection{Stimulus 1: MMCM Dynamic Phase Shift}
+
+A hit synchronous to a fixed clock is sampled by a phase-shifted clock; the
+MMCM phase is advanced in 280 steps of $T_{\mathrm{VCO}}/56 = 17.857$\,ps,
+covering exactly one 5\,ns period. This stimulus is deterministic and provides
+an absolute, crystal-referenced time ruler.
+
+\subsection{Stimulus 2: Ring Oscillator}
+
+A 31-stage ring oscillator free-running on the FPGA fabric generates hits that
+are asynchronous to the sampling clock and therefore uniformly distributed in
+phase. This stimulus requires no clock manipulation and can accumulate very
+large statistics in the background.
+
+\subsection{Measured Comparison}
+
+Table~\ref{tab:calcmp} summarizes the measured results. Both stimuli were
+evaluated with the calibration/validation split described above.
+
+\begin{table}[htbp]
+\caption{Measured Calibration Performance (Validation Set)}
+\label{tab:calcmp}
+\centering
+\begin{tabular}{lcc}
+\toprule
+ & MMCM phase sweep & Ring oscillator \\
+\midrule
+Accumulated hits (cal) & $5.6\times10^{7}$ & $1.21\times10^{8}$ \\
+Accumulated hits (val) & $5.6\times10^{7}$ & $1.50\times10^{8}$ \\
+Usable codes & 293 & 294 \\
+$W_{\mathrm{LSB}}$ & 17.07\,ps & 17.01\,ps \\
+\midrule
+DNL$_{\mathrm{pp}}$ before & 4.19\,LSB & 4.03\,LSB \\
+DNL$_{\mathrm{pp}}$ after  & 0.50\,LSB & \textbf{0.11\,LSB} \\
+INL$_{\mathrm{pp}}$ before & 8.94\,LSB & 8.55\,LSB \\
+INL$_{\mathrm{pp}}$ after  & 0.64\,LSB & \textbf{0.17\,LSB} \\
+\midrule
+Acquisition time & minutes (sweep) & 10--20\,min (background) \\
+Absolute reference & yes (crystal) & no \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Both stimuli recover the same underlying bin-width structure, as expected for
+two uniform samplings of the same physical delay line. The lower residual of
+the ring-oscillator case follows from its larger accumulated statistics rather
+than from any intrinsic advantage: the residual is dominated by the
+statistical difference between the calibration and validation histograms.
+The MMCM stimulus retains a distinct advantage in that its step size is
+crystal-referenced and therefore provides absolute time traceability.
+
+\begin{figure}[htbp]
+\centering
+\needfig{DNL before/after calibration (ring oscillator).\\
+Source: output of \texttt{DNL\_INL\_codedensity.py}.}
+\caption{Measured DNL before and after calibration.}
+\label{fig:dnl}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\needfig{INL before/after calibration (ring oscillator).}
+\caption{Measured INL before and after calibration.}
+\label{fig:inl}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\needfig{Cross-stimulus validation: LUT derived from the MMCM sweep applied to
+ring-oscillator data, and vice versa.}
+\caption{Cross-stimulus calibration transfer.}
+\label{fig:cross}
+\end{figure}
+
+\needdata{Cross-applied DNL/INL, i.e.\ MMCM-derived LUT evaluated on
+ring-oscillator data and the reverse. Agreement demonstrates that the
+calibration is independent of the stimulus used to obtain it.}
+
+% =====================================================================
+\section{Online Thermal Compensation and the Shape-Invariance Hypothesis}
+
+\subsection{Motivation}
+
+Carry-chain cell delay depends on process, supply voltage and temperature, so
+a table acquired once becomes stale. Recomputing the full 294-entry table
+online is expensive in both time and logic.
+
+\subsection{Hypothesis}
+
+Existing online schemes rescale the calibration by a single factor derived
+from an on-chip ring oscillator~\cite{bourdeauducq}. This is valid only if the
+\emph{relative} bin-width pattern is preserved under temperature change. We
+state this explicitly:
+
+\begin{quote}
+\textbf{Shape-invariance hypothesis.} The normalized bin-width pattern
+$\hat{W}_i = W_i / \overline{W}$ is invariant with temperature, while the mean
+bin width $\overline{W}$ scales with the fabric delay.
+\end{quote}
+
+The rationale is that the period-four pattern and the entry transient are
+consequences of the fixed internal geometry of the CARRY4 primitive and of the
+routing topology, both of which are temperature independent, whereas the
+absolute cell delay is not.
+
+If the hypothesis holds, online compensation reduces to
+\begin{equation}
+\mathrm{LUT}_{T} = K(T)\cdot \mathrm{LUT}_{\mathrm{ref}},
+\qquad
+K(T) = \frac{f_{\mathrm{RO,ref}}}{f_{\mathrm{RO}}(T)} ,
+\label{eq:scale}
+\end{equation}
+i.e.\ a single multiplication, since the ring oscillator is built from the same
+fabric primitives as the delay line and therefore tracks its delay directly.
+The oscillator frequency is measured against the MMCM-derived clock, which is
+crystal referenced and thus temperature stable, so $K(T)$ is obtained without
+any external sensor.
+
+\subsection{Test Procedure}
+
+The hypothesis is tested by acquiring code-density histograms at several
+junction temperatures, normalizing each by its own mean, and comparing the
+resulting shapes. Invariance is quantified by the residual
+\begin{equation}
+\varepsilon(T) = \max_i \left| \hat{W}_i(T) - \hat{W}_i(T_0) \right| ,
+\end{equation}
+reported in LSB, together with the fitted drift of $\overline{W}$ in
+ppm/$^{\circ}$C.
+
+\begin{figure}[htbp]
+\centering
+\needfig{Normalized bin-width pattern $\hat{W}_i$ at several temperatures,
+overlaid. Overlap supports shape invariance.}
+\caption{Test of the shape-invariance hypothesis.}
+\label{fig:shape}
+\end{figure}
+
+\needdata{Code-density histograms at several junction temperatures
+(e.g.\ 25, 45, 65, 85$^{\circ}$C); the shape residual $\varepsilon(T)$ in LSB;
+and the drift of the mean bin width $\overline{W}$ in ppm/$^{\circ}$C.}
+
+\subsection{Implementation}
+
+\needdata{Resource cost and update rate of the online correction hardware
+(ring-oscillator frequency counter plus scale multiplier).}
+
+% =====================================================================
+\section{Experimental Results}
+
+\subsection{Platform}
+
+\begin{table}[htbp]
+\caption{Implementation Platform}
+\centering
+\begin{tabular}{lc}
+\toprule
+Parameter & Value \\
+\midrule
+FPGA device & Xilinx Zynq-7000 (Zybo) \\
+Sampling clock & 200\,MHz ($T_{\mathrm{clk}}=5$\,ns) \\
+Delay line & 80 $\times$ CARRY4 = 320 taps \\
+Usable codes & 294 \\
+Average bin width & 17.0\,ps \\
+Coarse counter & dual phase ($0^{\circ}/180^{\circ}$) \\
+Calibration ROM & 320 $\times$ 13\,bit \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\needdata{Resource utilization: LUT / FF / BRAM / DSP counts and occupancy
+from the Vivado utilization report.}
+
+\subsection{Linearity}
+
+The measured linearity is given in Table~\ref{tab:calcmp} and
+Figs.~\ref{fig:dnl}--\ref{fig:inl}. After calibration, peak-to-peak DNL and INL
+are 0.11\,LSB and 0.17\,LSB respectively, i.e.\ 1.9\,ps and 2.9\,ps, at an
+unchanged average bin width of 17.0\,ps.
+
+\subsection{Dual-Phase Coarse Timestamping}
+
+\needdata{Single-phase versus dual-phase comparison: rate of one-clock-period
+timestamp discontinuities and coarse-count error rate. Suggested method:
+measure a fixed time interval repeatedly and count outliers of magnitude
+$T_{\mathrm{clk}}$.}
+
+\begin{figure}[htbp]
+\centering
+\needfig{Timestamp stability: single-phase versus dual-phase coarse counter.}
+\caption{Effect of dual-phase coarse timestamping.}
+\label{fig:metares}
+\end{figure}
+
+\subsection{Single-Shot Precision}
+
+\needdata{Standard deviation (RMS resolution) of $N$ repeated measurements of a
+fixed time interval, before and after calibration.}
+
+\subsection{Temperature Stability}
+
+\needdata{Measurement error from 25 to 85$^{\circ}$C for three configurations:
+(a) no calibration, (b) static calibration only, (c) the proposed online scale
+correction.}
+
+\begin{figure}[htbp]
+\centering
+\needfig{Timing error versus temperature for the three configurations.}
+\caption{Temperature stability.}
+\label{fig:temp}
+\end{figure}
+
+\subsection{Comparison with Prior Work}
+
+\needdata{Comparison table against prior work: device, LSB, DNL/INL, RMS
+resolution and thermal compensation method, including
+\cite{bourdeauducq,wang19ps,sensors2026,calibreview}.}
+
+% =====================================================================
+\section{Conclusion}
+
+We presented a 200\,MHz carry-chain TDC on a Zynq-7000 FPGA with dual-phase
+coarse timestamping and a code-density calibration methodology evaluated under
+a calibration/validation split. Measurement identifies two distinct structural
+nonlinearity mechanisms---an intra-CARRY4 period-four pattern spanning
+$3.72\times$ and an entry transient confined to the first three carry blocks
+and caused by \texttt{CYINIT} injection---while showing that clock-region
+crossing is not significant in this architecture. Calibration reduces
+peak-to-peak DNL from 4.03\,LSB to 0.11\,LSB and INL from 8.55\,LSB to
+0.17\,LSB at an unchanged 17.0\,ps average bin width, and the two independent
+stimuli recover the same structure. Finally, we formulated the
+shape-invariance hypothesis that underlies single-scalar online thermal
+compensation and defined an experiment to test it.
+\needdata{Concluding sentence summarizing the temperature-experiment outcome.}
+
+% =====================================================================
+\bibliographystyle{IEEEtran}
+\begin{thebibliography}{99}
+
+\bibitem{song}
+J. Song, Q. An and S. Liu, ``A high-resolution time-to-digital converter
+implemented in field-programmable-gate-arrays,'' \emph{IEEE Trans. Nucl. Sci.},
+vol.~53, no.~1, pp.~236--241, 2006.
+
+\bibitem{wu}
+J. Wu and Z. Shi, ``The FPGA-based wave union TDC: Increasing time resolution
+through multiple measurements,'' \emph{IEEE Trans. Nucl. Sci.}, vol.~55,
+no.~3, pp.~1503--1507, 2008.
+
+\bibitem{charbon}
+C. Favi and E. Charbon, ``A 17 ps resolution time-to-digital converter
+implemented in FPGA technology,'' in \emph{Proc. ACM/SIGDA FPGA Symp.}, 2009.
+
+\bibitem{bourdeauducq}
+S. Bourdeauducq, ``A 26 ps RMS time-to-digital converter core for Spartan-6
+FPGAs,'' arXiv:1303.6840, 2013.
+
+\bibitem{calibreview}
+``Calibration methods for time-to-digital converters,'' \emph{Sensors}, 2023.
+\needdata{verify authors, volume, issue and pages}
+
+\bibitem{wang19ps}
+``A 19 ps precision and 170 MSamples/s time-to-digital converter implemented in
+FPGA with online calibration,'' \emph{Applied Sciences}, vol.~12, no.~7,
+p.~3649, 2022.
+
+\bibitem{sensors2026}
+``Application and comparison of FPGA-based carry chain TDC and DDMTD schemes in
+high-precision time synchronization,'' \emph{Sensors}, vol.~26, no.~3, 2026.
+\needdata{verify authors and pages}
+
+\bibitem{atlasmdt}
+``Development of a time-to-digital converter ASIC for the upgrade of the ATLAS
+monitored drift tube detector,'' arXiv:1708.03692, 2017.
+
+\bibitem{xilinx_clock}
+Xilinx Inc., ``7 series FPGAs clocking resources user guide (UG472).''
+
+\bibitem{xilinx_clb}
+Xilinx Inc., ``7 series FPGAs configurable logic block user guide (UG474).''
+
+\end{thebibliography}
+
+\end{document}
