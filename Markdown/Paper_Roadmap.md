@@ -32,6 +32,136 @@
 
 ---
 
+## 1.1 원문 PDF 정독 결과 (2026-07-22 추가)
+
+> **추가 근거** `paper/ref/` 확보 논문 12편. `pdftotext` 전문 추출로 확인.
+> §1은 웹 검색 기반이었으나, 이하는 **원문 대조 결과**이므로 신뢰도가 한 단계 높다.
+> (단 그림·표 이미지는 미확인 — 본문·수치만 검증)
+
+### 보유 논문 목록
+
+| # | 문헌 | 출처 | 우리와의 관계 |
+|---|---|---|---|
+| 1 | Korkan & Yuksel, *32-Ch DPS-based TDC for 3-D LiDAR* | **IEEE TIM 2026** | 비교표 필수 (DPS 최신) |
+| 2 | Korkan & Yuksel, *Novel TAC & Wide Dynamic Range FPGA TDC* | **IEEE TIM 2022** | **⚠️ 온도 실험 선행** |
+| 3 | Tontini et al., *Low-Cost FPGA-Based TDC* | **IEEE TNS 2018** | **⚠️ 2방식 DNL 교차검증 선행** |
+| 4 | Parsakordasiabi et al., *Low-Resources TDC, 28nm* | Sensors 2021 | ones/zeros counter 인코더 = popcount 선행 |
+| 5 | Chen, *Dual-Mode Triple-TDC w/ Real-Time Calibration* | Electronics 2020 | 실시간 교정 선행 |
+| 6 | Wu, *Several Key Issues on Delay Line TDCs* | IEEE TNS 2010 | Wave Union 원전, bin-by-bin 표준 |
+| 7 | Won & Lee, *Tuned-Delay Line, 28/40/45nm* | IEEE TIM 2016 | sum/carry-out bin 튜닝 |
+| 8 | Liang et al., *64-Ch 4.77ps RMS, 28nm* | JINST 2024 | clock-region skew bubble 온라인 처리 |
+| 9 | Zheng et al., *Low-Cost FPGA TDC High Density* | IEEE TNS 2017 | 320ch 다채널 |
+| 10 | Huemer et al., *Duplex TDC for Metastability* | DDECS 2018 | 부차적 |
+| 11 | Ko & Lee, *Dual-threshold FPGA-only digitizer* | Biomed Eng Lett 2024 | 프론트엔드 (TDC 외곽) |
+| 12 | 국내 학위논문 (2013) | RISS | Tapped delay TDC 정확도 |
+
+---
+
+### (A) ⚠️ Korkan & Yuksel, IEEE TIM 2022 — 온도 실험이 이미 있다
+
+**R1(온도 실험)의 전제가 선행연구에 존재한다.** 정확한 범위는 다음과 같다.
+
+**그들이 한 것 (§III-B, Fig. 5):**
+- ESPEC SFH-261 챔버, **−30 °C ~ 105 °C**, XADC로 온도 모니터
+- 측정량: **5 ns에 들어가는 carry cell 개수** (온도별, 1024회 평균, 2개 딜레이라인)
+- 결과: cell당 지연 **21.7 → 17.85 ps** (1번 라인), **20 → 17.9 ps** (2번 라인)
+- **24 ~ 39 °C가 zero temperature coefficient 구간**이라고 보고
+- 결론: *"XADC를 피드백으로 쓰는 보드 온도 컨트롤러를 설계해 24~39 °C를 유지하라"*
+
+**그들이 하지 않은 것 (= 우리에게 남은 공간):**
+
+| 항목 | Korkan 2022 | 본 연구 |
+|---|---|---|
+| 측정 단위 | **집계 스칼라 1개** (5 ns당 cell 수) | **bin별 폭 배열 320개** |
+| 형상(shape) | 미측정 — DNL 패턴의 온도 의존성 없음 | **형상 잔차 ε(T) 정량화** |
+| 대응 전략 | **온도를 회피** (컨트롤러로 구간 유지) | **온도를 보상** (스칼라 K(T) 실시간 곱) |
+| 온도별 DNL/INL | **TAC(아날로그 XOR)에 대해서만** 수행 | **TDL TDC 자체**에 대해 수행 |
+| 배율 프록시 | XADC(온도계) | **RO(지연 그 자체)** |
+
+**판정: R1은 살아남는다. 단 주장을 좁혀야 한다.**
+- ❌ 못 쓰는 표현: "FPGA TDC의 온도 의존성을 최초로 측정"
+- ✅ 쓸 수 있는 표현: "선행연구는 **집계 스케일**의 온도 드리프트만 보고했다 [Korkan 2022].
+  본 연구는 **bin 단위 형상**이 온도 불변임을 보여, 스칼라 보정이 충분한 **이유**를 제공한다."
+- Korkan의 데이터(cell당 21.7→17.85 ps, 약 **20 % 드리프트**)는 오히려 **우리 동기(motivation)의 강력한 인용거리**다.
+
+**부수 확인 — 우리 DPS 상수가 문헌과 일치:**
+> *"VCO 1000 MHz, DPS 해상도 = VCO 주기의 1/56 → 17.86 ps"* (§III-B)
+
+`phase_shifter.v`의 `PHASE_STEP = 1000/56 ≈ 17.857 ps`와 **정확히 일치**. 인용 가능한 근거 확보.
+
+---
+
+### (B) Korkan & Yuksel, IEEE TIM 2026 — 비교표 필수, 온도 위협은 없음
+
+- **2026-01-30 게재.** §1 웹 검색 시점 이후라 기존 문헌표에 누락돼 있었다.
+- 방식: DPS를 **교정 수단이 아니라 TDC 방식 자체**로 사용 (TDL 아님) + 고속 카운터
+- 성능: LSB 10 ps, 정밀도 11~16 ps, **DNL −0.8 ~ 0.82**, **INL −0.57 ~ 0.67 LSB**
+- 자원: 32ch에 2519 LUT / 2700 DFF (채널당 70 LUT / 68 DFF), XC7A100T
+- **온도 실험 없음** (junction temp 26 °C는 Vivado 전력분석 값일 뿐)
+
+→ TIM 투고 시 **비교표에 반드시 포함**. 우리 차별점은 *"TDL의 고해상도를 유지하면서 DPS는 교정에만 사용"* 이라는 역할 분담.
+
+---
+
+### (C) ⚠️ Tontini et al., IEEE TNS 2018 — 2자극 교차검증 선행 (T1 영향)
+
+**T1(DPS↔RO 교차검증)의 개념이 선행한다.** 초록에 *"novel comparison between the DNLs obtained with two different methods"* 로 명시.
+
+**그들이 한 것 (§III-D, Fig. 10):**
+- 방법 A: SPAD(주변광 조명)를 무작위 소스로 한 **통계적 code density test**
+- 방법 B: **Keysight 81150A** 신호발생기로 1 ps 스텝 전 범위 스윕, 스텝당 8192회 측정 median → 변환곡선에서 DNL 산출
+- 결과: 두 DNL이 **거의 완전 일치** → *"통계적 code density test의 신뢰성 증명"*
+
+**차이점 (T1이 살아남는 근거):**
+
+| 항목 | Tontini 2018 | 본 연구 (T1) |
+|---|---|---|
+| 기준 자극 | **외부 계측기** (Keysight 81150A) | **온칩 MMCM DPS** — 계측기 불필요 |
+| 무작위 자극 | 외부 SPAD + 광원 | **온칩 Ring Oscillator** |
+| 비교 대상 | code density **방법론** vs 변환곡선 방법론 | 동일 방법론 하의 **두 자극원** |
+| 비용 | 계측기 + SPAD 필요 | **FPGA 하나로 완결** |
+
+**판정: T1도 살아남되, 프레이밍을 바꾼다.**
+- ✅ **"instrument-free, fully on-chip two-stimulus cross-validation"**
+- Tontini를 *계측기 기반 선례*로 선제 인용하고, 우리는 **외부 장비 없이 같은 검증을 한다**는 점을 기여로.
+
+**추가 확인:** Tontini도 **ones-counter 디코더**(= 우리 popcount)를 최종 구현에 사용. Sensors 2021 [#4]도 동일.
+→ **popcount는 신규성 주장 불가**. 이미 로드맵 방침(§3.1)과 일치하나, 인용을 이 두 편으로 확정.
+
+---
+
+### (D) 미확보 — 반드시 구해서 확인해야 할 선행연구 3편
+
+Korkan 2026 참고문헌에서 발견. **우리 차별화 포인트를 직접 겨냥**한다.
+
+| 문헌 | 왜 위험한가 | 우선순위 |
+|---|---|---|
+| Won, Kwon, Yoon, Ko, Son, Lee, **"Dual-phase tapped-delay-line TDC with on-the-fly calibration implemented in 40 nm FPGA,"** *IEEE TBCAS* 10(1):231–242, Feb 2016 | **dual-phase TDL + 온라인 교정** — 차별화 #4와 #5를 동시에 타격. 제목이 우리 설계와 거의 같다 | **P0 (최우선)** |
+| Pan, Gong, Li, **"A 20-ps TDC implemented in FPGA with automatic temperature correction,"** *IEEE TNS* 61(3):1468–1473, Jun 2014 | **자동 온도 보정** — R1의 직접 선행 가능성 | **P0** |
+| Mao et al., **"A low temperature coefficient TDC with 1.3 ps resolution in a 28 nm FPGA,"** *Sensors* 22(6):2306, Mar 2022 | 저온도계수 설계 — 온도 축 경쟁 논문 | P1 |
+
+> Won 2016은 SNU(이재성 교수 그룹)이며 `paper/ref/`의 #7, #11과 같은 연구실이다.
+> **이 논문을 읽기 전에는 차별화 #4(dual-phase)와 R1(온도)의 신규성을 확정하지 말 것.**
+
+---
+
+### 1.1 요약 — 판정 변화
+
+| 항목 | §1 판정 (웹) | 원문 정독 후 |
+|---|---|---|
+| DPS 교정 | ❌ 기존 | ❌ 기존 (Korkan 2022/2026 확정) |
+| RO code density | ❌ 기존 | ❌ 기존 |
+| DPS↔RO 교차검증 (T1) | ⚠️ 약함 | ⚠️ **약함 — 단 "계측기 불필요"로 재프레이밍하면 유효** |
+| Dual-phase coarse | ❌ 기존 | ❓ **Won 2016 확인 전까지 보류** |
+| RO 실시간 온도보정 | ❌ 기존 | ❌ 기존 |
+| **형상 불변성 (R1)** | ✅ 공백 | ✅ **공백 유지** — Korkan은 집계 스칼라만, 형상은 미측정 |
+
+**결론: 논문의 승부처는 여전히 §2.1 형상 불변성 하나다.** 오히려 Korkan 2022가
+"스케일은 20 % 드리프트한다"를 이미 출판해 둔 덕분에, **문제의 실재성을 인용으로 확보**하고
+우리는 **해법(형상 불변 → 스칼라 1개면 충분)** 에만 집중할 수 있게 됐다.
+
+---
+
 ## 2. 남은 공백 (Novelty 후보)
 
 선행연구를 종합하면 다음 지점이 비어 있다.
@@ -40,6 +170,10 @@
 
 - Bourdeauducq는 **RO로 스칼라 배율 보정**을 수행하지만, **"왜 배율 하나로 충분한가"** 를 입증하지 않았다.
 - Calibration Methods는 average-bin-width가 효과적임을 보이지만 **온도 축에서 검증하지 않았다.**
+- **Korkan & Yuksel (TIM 2022)** 는 −30~105 °C에서 **집계 스케일**(5 ns당 carry cell 수)이
+  약 20 % 드리프트함을 실측했으나(cell당 21.7→17.85 ps), **bin별 형상은 측정하지 않았고**
+  대응책으로 *보상*이 아니라 *온도 구간 유지(회피)* 를 제안했다. → §1.1-A
+  즉 **"문제는 실재한다"는 근거는 인용으로 확보되었고, "해법"만 비어 있다.**
 
 > **가설:** CARRY4의 비선형 *형상*(period-4 패턴, 상대 bin 폭 비율)은 실리콘 레이아웃이 결정하므로 온도 불변이고, 변하는 것은 **전체 배율**뿐이다.
 
@@ -294,10 +428,23 @@ R2의 4-way 비교:
 | # | 과제 |
 |---|---|
 | T13 | `calibreview`, `sensors2026` 저자/권/호/페이지 확인 |
-| T14 | 선행연구 비교표 작성 (device / LSB / DNL / INL / RMS / 온도보정 방식) |
+| T14 | 선행연구 비교표 작성 (device / LSB / DNL / INL / RMS / 온도보정 방식) — **Korkan TIM 2026 반드시 포함** (§1.1-B) |
 | T15 | **IEEE Xplore·Google Scholar 정밀 재조사** — 특히 "shape invariance", "scale-only calibration" 키워드 |
 
 > T15는 필수. 본 조사는 웹 검색 수준이므로 신규성 확정 근거로 부족하다.
+
+### ⛔ T16 — 선행연구 원문 확보 (실질 P0, 실험보다 먼저)
+
+§1.1-D에서 발견. **이 3편을 읽기 전에는 차별화 #4와 R1의 신규성을 확정할 수 없다.**
+
+| # | 과제 | 무엇을 확인할 것인가 |
+|---|---|---|
+| T16a | **Won et al., IEEE TBCAS 10(1):231–242, 2016** — *Dual-phase TDL TDC with on-the-fly calibration* | (1) dual-phase가 우리와 같은 0°/180° coarse 방식인가 (2) on-the-fly calibration이 스칼라인가 bin별인가 (3) 온도 실험이 있는가 |
+| T16b | **Pan et al., IEEE TNS 61(3):1468–1473, 2014** — *20-ps TDC with automatic temperature correction* | (1) 보정량이 스칼라인가 (2) 형상 불변을 가정만 했는가 검증했는가 (3) 프록시가 XADC인가 RO인가 |
+| T16c | **Mao et al., Sensors 22(6):2306, 2022** — *Low temperature coefficient TDC, 1.3 ps* | 온도계수 억제가 설계적(구조)인가 보정적(SW)인가 |
+
+> **T16a가 최우선.** 제목이 본 설계와 거의 동일하며(dual-phase + 온라인 교정),
+> 결과에 따라 §3.3 제목과 §3.1 기여 목록(C1–C4)을 재조정해야 할 수 있다.
 
 ---
 
@@ -356,13 +503,18 @@ LED 부하 대조  : net 4227→2143 ps 인데 DNL 4.23→4.20 (배선지연 무
 ### 7.1 단기 (경로 B — 학회 목표)
 
 ```
+0. T16a (Won 2016 TBCAS 원문)     <- ★ 실험보다 먼저. 신규성 전제 확인 (1.1-D)
 1. T1 (DPS<->RO 교차검증)         <- 지금 즉시, 추가 측정 불필요
 2. T2~T5 (그림·자원 export)       <- 초안 시각자료 완성
 3. T6~T7 (온도 실험)  ★★★         <- 논문의 승부처. 여기서 전략이 갈림 (3.8 참조)
 4. R2 4-way 비교 (3.5)            <- 스칼라 보정 실효성 입증
-5. T15 (문헌 정밀 재조사)          <- novelty 확정 전 필수
+5. T15 + T16b/c (문헌 정밀 재조사) <- novelty 확정 전 필수
 6. T8 (single-shot precision)     <- 비교표 작성용
 ```
+
+> **0번을 먼저 두는 이유:** T6~T7(온도 실험)은 챔버·시간이 드는 고비용 작업이다.
+> Won 2016이 이미 dual-phase + 온라인 교정 + 온도까지 다뤘다면 실험 설계 자체를
+> 바꿔야 하므로, **논문 한 편 읽는 비용으로 실험 낭비를 막는다.**
 
 ### 7.2 장기 (경로 A — 저널 확장 시 추가)
 
