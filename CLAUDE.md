@@ -17,6 +17,16 @@ origin/<branch>..HEAD` for both directions). If there is any difference — loca
 remote commits not pulled, or divergence — report it to the user and ask whether to push, pull, or
 leave it as-is. Never push or pull without asking first (per the standing rule above).
 
+## End-of-session daily report
+
+When the user signals the end of a work session — e.g. says "오늘은 그만하자" (let's stop for
+today) or an equivalent end-of-day phrase — generate a daily report of that session's work and save
+it to `Markdown/<YYYY-MM-DD>_report.md` (today's date). Follow the markdown provenance header style
+below. The report should summarize, in Korean: what was done, key findings/decisions, measurement
+data produced (with provenance — mode/purpose/hit-count for histograms), any bugs diagnosed, files
+created/deleted/committed, and open decisions / next-day tasks. Keep numbers accurate and
+cross-referenced to the actual files and commits. Do not commit it unless the user asks.
+
 ## File provenance and edit-history conventions
 
 These apply to every file Claude creates or edits in this repo, so that authorship and change
