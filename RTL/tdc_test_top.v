@@ -81,6 +81,48 @@ module tdc_test_top #(
     always @(posedge ro_clk_buffered) ro_divider_cnt <= ro_divider_cnt + 1'b1;
 
     wire hit_random = ro_divider_cnt[5]; 
+    
+    
+      // ==========================================================
+    // ★ 추가: Ring Oscillator 주파수 카운터 (1초 타이머 기반)
+    // ==========================================================
+    // 1. 기준 타이머: 200MHz 클럭을 2억 번 세면 정확히 1초 (1Hz)
+    reg [27:0] sec_cnt = 0;
+    reg sec_tick = 0;
+
+    always @(posedge clk_200_fixed) begin
+        if (sec_cnt == 28'd199_999_999) begin
+            sec_cnt <= 0;
+            sec_tick <= 1'b1; // 1초마다 1클럭 동안 High
+        end else begin
+            sec_cnt <= sec_cnt + 1'b1;
+            sec_tick <= 1'b0;
+        end
+    end
+
+    // 2. 비동기 신호(hit_random)를 200MHz 도메인으로 안전하게 가져옴 (CDC 보장)
+    reg hit_sync_d1, hit_sync_d2, hit_sync_d3;
+    always @(posedge clk_200_fixed) begin
+        hit_sync_d1 <= hit_random;
+        hit_sync_d2 <= hit_sync_d1;
+        hit_sync_d3 <= hit_sync_d2;
+    end
+    
+    // hit_random의 상승 엣지 검출
+    wire hit_edge = (hit_sync_d2 && !hit_sync_d3);
+
+    // 3. 1초 동안 hit_edge가 몇 번 발생했는지 카운트
+    reg [31:0] hit_freq_counter = 0;
+    (* mark_debug = "true" *) reg [31:0] ro_hit_freq_hz = 0; // 이 값을 ILA로 봅니다!
+
+    always @(posedge clk_200_fixed) begin
+        if (sec_tick) begin
+            ro_hit_freq_hz <= hit_freq_counter; // 1초가 되면 카운트 결과를 저장
+            hit_freq_counter <= 0;              // 다음 1초를 위해 카운터 초기화
+        end else if (hit_edge) begin
+            hit_freq_counter <= hit_freq_counter + 1'b1;
+        end
+    end
 
     // ==========================================
     // 3. 하드코딩된 모드 선택 제너레이터
@@ -288,7 +330,8 @@ module tdc_test_top #(
         // --- [COE 추출을 위한 히스토그램 프로브 그룹 CODE DENSITY TEST] ---
         .probe1 (readout_active),            // [0:0]  히스토그램 캡처 조건 (1일 때 캡처)
         .probe4 (probe_read_addr_d1),        // [8:0]  히스토그램 X축: Tap 인덱스 (0~319)
-        .probe5 (histo_read_data)            // [31:0] 히스토그램 Y축: 누적 카운트 값
+        .probe5 (histo_read_data),
+        .probe6 (ro_hit_freq_hz)  // [31:0] RO Hit 주파수          // [31:0] 히스토그램 Y축: 누적 카운트 값
     );
   
 
