@@ -62,7 +62,7 @@ name but **not present as source** in this repo:
 | IP core name | Used in | Purpose |
 |---|---|---|
 | `clk_wiz_0` | `tdc_test_top.v` | MMCM: fixed 200 MHz + phase-shiftable 200 MHz clock |
-| `ila_0` (`universal_ila`) | `tdc_test_top.v` | 6-probe Integrated Logic Analyzer, the only way to get data off-chip |
+| `ila_0` (`universal_ila`) | `tdc_test_top.v` | Integrated Logic Analyzer, the only way to get data off-chip. Probe count/widths change often — read the current instantiation, never assume |
 | `tdc_calib_rom` | `tdc_timestamp_calc.v` | 320×13-bit calibration LUT, latency 2, loaded from a `.coe` |
 
 ## Commands
@@ -135,21 +135,12 @@ Mode 1 can only validate code density.
 previous hit got added to the current address), which was the root cause of a previously-flat-looking
 histogram. Do not merge these states without re-verifying both timing and RMW correctness.
 
-### ILA readout addressing — the `probe_read_addr_d1` register
+### Histogram readout addressing — the `probe_read_addr_d1` register
 
 `tdc_bram_512x32`'s port B output is registered (`dout_b <= mem[addr_b]`), i.e. one cycle of read
-latency. The ILA samples an address probe and a data probe on the same edge, so the raw sweep address
-must be delayed by one cycle (`probe_read_addr_d1`) to stay aligned with `histo_read_data` — otherwise
-the whole histogram is shifted by one bin. If you rewire the ILA probes, keep this pairing.
-
-### `universal_ila` has two independent probe groups sharing one ILA core
-
-Probes 0/2/3 (`capture_trigger`/`current_loop_cnt`/`final_timestamp_ps[47:0]`) are for
-**timestamp/INL validation**; probes 1/4/5 (`readout_active`/`probe_read_addr_d1`/`histo_read_data`)
-are for **code-density histogram capture**. They're captured simultaneously but analyzed by different
-Python scripts. If you resize `probe3` (48 bits for the timestamp), the stale comment elsewhere in the
-file claiming "probe2 width 32→48" is wrong — check `universal_ila`'s actual probe numbering, not the
-commented-out legacy instance below it.
+latency. Address and data are sampled on the same edge, so the raw sweep address must be delayed one
+cycle (`probe_read_addr_d1`) to stay aligned with `histo_read_data` — otherwise the whole histogram
+is shifted by one bin. Keep this address/data pairing intact.
 
 ## Calibration methodology (why the Python pipeline is shaped this way)
 
@@ -168,7 +159,8 @@ commented-out legacy instance below it.
 
 | Path | Contents |
 |---|---|
-| `*.v`, `tdc.xdc` | RTL and constraints (flat, no `src/` subdirectory) |
+| `RTL/` | Verilog sources and `tdc.xdc` constraints |
+| `Parts/` | Datasheets for the physical board build (DAC, comparator, laser controller) |
 | `python/` | Calibration/analysis scripts + their CSV/COE inputs-outputs (mostly gitignored) |
 | `Markdown/` | Design docs and the paper roadmap — **`Paper_Roadmap.md` is the entry point**, it has its own "how to read this document" section (§0) covering task/requirement/contribution numbering (T#/R#/C#) |
 | `paper/` | LaTeX draft (`main.tex`) and `paper/ref/` — literature PDFs backing novelty claims |

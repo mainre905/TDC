@@ -83,46 +83,109 @@ module tdc_test_top #(
     wire hit_random = ro_divider_cnt[5]; 
     
     
-      // ==========================================================
-    // ★ 추가: Ring Oscillator 주파수 카운터 (1초 타이머 기반)
     // ==========================================================
-    // 1. 기준 타이머: 200MHz 클럭을 2억 번 세면 정확히 1초 (1Hz)
-    reg [27:0] sec_cnt = 0;
-    reg sec_tick = 0;
+    // ★ RO 주파수 카운터 — 2026-07-24 수정 (원본: 1초 게이트, ÷64 탭)
+    // ==========================================================
+    //  [변경1] 게이트 1s -> 10ms.
+    //     이유: injection lock 판정은 평균이 아니라 '변동'으로 해야 한다.
+    //           잠긴 RO는 매번 정확히 같은 값이 나오고, 자유발진 RO는 흔들린다.
+    //           1s 게이트는 ILA 한 캡처(=5us 창)에 값이 1개뿐이라 변동을
+    //           볼 수 없었다. 10ms면 storage qualification으로 1024샘플
+    //           = 10.24초 이력을 한 번에 확보한다.
+    //     주의: code density에는 이 '흔들림'이 오히려 필수다. RO가 드리프트해야
+    //           hit이 클럭 주기 전 위상을 고르게 훑는다.
+    //  [변경2] 측정 탭 ro_divider_cnt[5](÷64) -> [1](÷4).
+    //     이유: hit_random([5])은 TDC 데드타임(~15ns) 확보용이라 그대로 두고,
+    //           주파수 카운터만 별도 탭을 쓴다. 같은 게이트에서 카운트 16배
+    //           -> 분해능 16배. Nyquist: f_RO=40MHz 가정 시 탭 주파수 10MHz,
+    //           200MHz 샘플링으로 주기당 20샘플이라 여유 충분.
+    //  [변경3] gate_tick과 에지가 같은 사이클에 겹치면 그 에지가 유실되던 버그
+    //           수정 (원본은 카운터를 무조건 0으로 리셋했음).
+    //  [변경4] meas_strobe 추가 — ILA storage qualification용.
+    //           gate_tick 시점에 캡처하면 '갱신 전' 값이 잡히므로 1클럭 지연.
+    // ==========================================================
+    localparam integer GATE_CYCLES = 2_000_000;  // 10 ms @ 200MHz
+    localparam integer RO_MEAS_TAP = 1;          // ro_divider_cnt 탭 (÷4)
 
+    reg [20:0] gate_cnt  = 0;
+    reg        gate_tick = 0;
     always @(posedge clk_200_fixed) begin
-        if (sec_cnt == 28'd199_999_999) begin
-            sec_cnt <= 0;
-            sec_tick <= 1'b1; // 1초마다 1클럭 동안 High
+        if (gate_cnt == GATE_CYCLES-1) begin
+            gate_cnt  <= 0;
+            gate_tick <= 1'b1;
         end else begin
-            sec_cnt <= sec_cnt + 1'b1;
-            sec_tick <= 1'b0;
+            gate_cnt  <= gate_cnt + 1'b1;
+            gate_tick <= 1'b0;
         end
     end
 
-    // 2. 비동기 신호(hit_random)를 200MHz 도메인으로 안전하게 가져옴 (CDC 보장)
-    reg hit_sync_d1, hit_sync_d2, hit_sync_d3;
+    // RO(비동기) -> 200MHz 도메인 동기화. ASYNC_REG로 배치 밀착 유도(MTBF 확보).
+    wire ro_meas_tap = ro_divider_cnt[RO_MEAS_TAP];
+    (* ASYNC_REG = "TRUE" *) reg ro_sync_d1 = 0;
+    (* ASYNC_REG = "TRUE" *) reg ro_sync_d2 = 0;
+    reg ro_sync_d3 = 0;
     always @(posedge clk_200_fixed) begin
-        hit_sync_d1 <= hit_random;
-        hit_sync_d2 <= hit_sync_d1;
-        hit_sync_d3 <= hit_sync_d2;
+        ro_sync_d1 <= ro_meas_tap;
+        ro_sync_d2 <= ro_sync_d1;   // 메타스테빌리티 해소
+        ro_sync_d3 <= ro_sync_d2;   // 에지 검출용 1클럭 추가 지연
     end
-    
-    // hit_random의 상승 엣지 검출
-    wire hit_edge = (hit_sync_d2 && !hit_sync_d3);
+    wire ro_edge = (ro_sync_d2 && !ro_sync_d3);
 
-    // 3. 1초 동안 hit_edge가 몇 번 발생했는지 카운트
-    reg [31:0] hit_freq_counter = 0;
-    (* mark_debug = "true" *) reg [31:0] ro_hit_freq_hz = 0; // 이 값을 ILA로 봅니다!
+    reg [31:0] ro_edge_cnt  = 0;
+    (* mark_debug = "true" *) reg [31:0] ro_meas_cnt = 0;  // 게이트(10ms)당 에지 수
+    reg        meas_strobe  = 0;
 
     always @(posedge clk_200_fixed) begin
-        if (sec_tick) begin
-            ro_hit_freq_hz <= hit_freq_counter; // 1초가 되면 카운트 결과를 저장
-            hit_freq_counter <= 0;              // 다음 1초를 위해 카운터 초기화
-        end else if (hit_edge) begin
-            hit_freq_counter <= hit_freq_counter + 1'b1;
+        if (gate_tick) begin
+            ro_meas_cnt <= ro_edge_cnt;
+            ro_edge_cnt <= ro_edge ? 32'd1 : 32'd0;  // [변경3] 겹침 시 유실 방지
+        end else if (ro_edge) begin
+            ro_edge_cnt <= ro_edge_cnt + 1'b1;
         end
+        meas_strobe <= gate_tick;                    // [변경4] 갱신 확정 사이클
     end
+
+    // ==========================================================
+    // ★ XADC 다이 온도 — 2026-07-24 신규
+    // ==========================================================
+    //  목적: RO 주파수와 온도의 상관을 '동시 캡처'로 확인하기 위함.
+    //        (기존에는 Hardware Manager의 System Monitor를 눈으로 읽어
+    //         ILA 값과 손으로 짝지어야 해서 동시성이 없었다.)
+    //  동작: 변환 완료(eoc) -> DRP 주소 0x00(온도) 1회 읽기 -> drdy에 래치.
+    //  환산: Temp[C] = (do_out[15:4] * 503.975 / 4096) - 273.15
+    //        (12비트 결과가 16비트 레지스터의 상위에 정렬되어 있음)
+    //  gate_tick에 함께 래치해 ro_meas_cnt와 시점을 명시적으로 맞춘다.
+    // ==========================================================
+    wire        xadc_eoc, xadc_drdy;
+    wire [15:0] xadc_do;
+    reg         xadc_den      = 1'b0;
+    reg [15:0]  die_temp_raw  = 16'd0;
+    (* mark_debug = "true" *) reg [15:0] die_temp_at_meas = 16'd0;
+
+    always @(posedge clk_200_fixed) begin
+        xadc_den <= 1'b0;                       // 기본 0, eoc에서만 1클럭 펄스
+        if (xadc_eoc)  xadc_den     <= 1'b1;
+        if (xadc_drdy) die_temp_raw <= xadc_do;
+        if (gate_tick) die_temp_at_meas <= die_temp_raw;  // 주파수와 시점 정렬
+    end
+
+    xadc_wiz_0 u_xadc (
+        .daddr_in    (7'h00),          // 0x00 = on-chip temperature
+        .dclk_in     (clk_200_fixed),
+        .den_in      (xadc_den),
+        .di_in       (16'h0000),
+        .dwe_in      (1'b0),
+        .do_out      (xadc_do),
+        .drdy_out    (xadc_drdy),
+        .reset_in    (1'b0),
+        .vp_in       (1'b0),
+        .vn_in       (1'b0),
+        .busy_out    (),
+        .channel_out (),
+        .eoc_out     (xadc_eoc),
+        .eos_out     (),
+        .alarm_out   ()
+    );
 
     // ==========================================
     // 3. 하드코딩된 모드 선택 제너레이터
@@ -330,8 +393,15 @@ module tdc_test_top #(
         // --- [COE 추출을 위한 히스토그램 프로브 그룹 CODE DENSITY TEST] ---
         .probe1 (readout_active),            // [0:0]  히스토그램 캡처 조건 (1일 때 캡처)
         .probe4 (probe_read_addr_d1),        // [8:0]  히스토그램 X축: Tap 인덱스 (0~319)
-        .probe5 (histo_read_data),
-        .probe6 (ro_hit_freq_hz)  // [31:0] RO Hit 주파수          // [31:0] 히스토그램 Y축: 누적 카운트 값
+        .probe5 (histo_read_data),           // [31:0] 히스토그램 Y축: 누적 카운트 값
+
+        // --- [RO 주파수/온도 특성화 그룹] 2026-07-24 추가 ---
+        //   probe7을 storage qualification 조건으로 걸어야 게이트당 1샘플만
+        //   저장되어 depth 1024 = 10.24초 이력이 된다. (basic 캡처로 뽑으면
+        //   같은 값이 1024번 중복될 뿐 변동을 볼 수 없음)
+        .probe6 (ro_meas_cnt),               // [31:0] 게이트(10ms)당 RO 에지 수
+        .probe7 (meas_strobe),               // [0:0]  자격저장/트리거 조건
+        .probe8 (die_temp_at_meas)           // [15:0] XADC 다이 온도 (raw)
     );
   
 
