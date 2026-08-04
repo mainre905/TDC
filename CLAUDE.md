@@ -9,6 +9,29 @@ Propose the change (what and why), wait for confirmation, then act. This applies
 seems obvious — a one-line RTL edit changes Vivado place & route determinstically and can silently
 invalidate previously-captured calibration data.
 
+## Numbers must carry their provenance
+
+**Every number Claude reports must arrive with where it came from, how it was computed, and why
+that computation.** This applies to chat replies, markdown reports, and code comments alike — no
+exceptions, including for numbers that look obvious or that were computed earlier in the same
+session. State, next to the number:
+
+1. **Source** — the exact file(s) and/or command it came from (e.g. `python/histo_temp/histo_80_2.csv`,
+   `report_timing -to .../u_ff_3/D`). If it came from the user's own paste, say so.
+2. **Formula** — the actual expression, with what each symbol is
+   (e.g. `w[i] = h[i]/H × 5000 ps`, `H` = sum of `h` over taps 1..273).
+3. **Why this method** — what the number is supposed to mean, and what alternative it was chosen
+   over when more than one definition exists. Two defensible statistics on the same data can differ
+   by 10× (this happened: mean-of-ratios vs ratio-of-means on the `tap%4` groups), so naming the
+   metric is not optional.
+4. **Any transformation applied to data that came from elsewhere** — unit changes, row reordering,
+   filtering, outlier exclusion. Never silently reorder or rescale a table the user supplied.
+
+Also label every quantity as one of **measured / derived / assumed**, and never present an
+unverified interpretation with the same confidence as a measurement. If a physical explanation
+(which delay element, which structure, which mechanism) has not been checked against the RTL, the
+netlist, or the timing model, say it is a hypothesis — or do not say it at all.
+
 ## Start-of-session sync check
 
 Before doing any work in a new session, run `git fetch` and compare the local branch against its
