@@ -32,6 +32,64 @@ unverified interpretation with the same confidence as a measurement. If a physic
 (which delay element, which structure, which mechanism) has not been checked against the RTL, the
 netlist, or the timing model, say it is a hypothesis — or do not say it at all.
 
+## Define every term at first use, and keep one name per thing
+
+Never use a term of art — 잔차(residual), 가중 RMS(weighted RMS), 노이즈 바닥(noise floor), LUT,
+DNL/INL, or a shorthand label like "C2" — without defining it, in plain language, **in the same
+message where it first appears**, next to the number it labels. "가중 RMS 22.3 ps" was reported a
+dozen times before anyone said *what* was being weighted (each tap's error by how often a hit
+actually lands in that tap, i.e. by its width). That is a failure, not a style preference.
+
+- **One name per object for the whole session.** LUT / 표 / 교정표 were used interchangeably for the
+  same 320-entry table; that alone destroyed the thread of an explanation. If a name has to change,
+  say explicitly that it is the same thing.
+- **Plain meaning before formula.** Say what the number means for this hardware ("the reported
+  timestamp is off by this much") before writing any expression.
+- **Explain the metric, not just its value.** A max and a hit-weighted mean answer different
+  questions ("worst tap" vs "what a real measurement typically suffers"); name which one is being
+  used and why.
+
+## Separate what is in the hardware from what exists only in analysis
+
+State, every time, whether an object is:
+- **loaded in the device** — e.g. `dummy_rom.coe`, a linear ramp, is what the calibration ROM has
+  actually contained during the measurements so far; **no code-density LUT has ever been built into
+  the FPGA**; or
+- **computed in Python and never built** — e.g. the "40 °C LUT" derived from a histogram.
+
+Never discuss a computed-only artifact as if it were running on the board. When a result is
+conditional, say the condition out loud: *"if a LUT were built from the 40 °C histogram and applied
+at 80 °C with a single scale factor, the error would be …"*.
+
+## State what a comparison grants to the method under test
+
+When reproducing a published method, say exactly what was given to it. The scalar `k` standing in
+for Pan 2014's temperature correction was **back-fitted from the 40 °C and 80 °C datasets together**
+— a value unobtainable in a real system, deliberately generous to the method being challenged.
+Calling it "the optimal scale factor" without that caveat misrepresents the comparison. Say who
+computed each quantity and whether it was ever applied to hardware.
+
+## Do not let edge artifacts become headline numbers
+
+Before quoting a max-like statistic, check whether it is dominated by the boundary of the analysis
+window, and sweep the window to show it is not. The first reported figure of 66.7 ps came almost
+entirely from the last tap, where the delay chain only barely reaches within one clock period at the
+colder temperature — a chain-length artifact, not a shape change. Excluding the boundary gives
+**42.7 ps**, stable (41–48 ps) across window upper bounds from 250 to 278. Report the sweep, not a
+single cut.
+
+The same trap in ratio form: per-tap relative changes are dominated by the narrowest bins, where a
+0.1 ps absolute change reads as tens of percent. Prefer width-weighted statistics, and never average
+ratios across bins of wildly different width without saying so.
+
+## Flag a conclusion that is still moving
+
+If a claim has already been revised once in the session, say so when restating it, and say what
+measurement would settle it. Three consecutive, confident, mutually contradictory physical
+explanations of the same `tap%4` pattern were each presented as a finding, every one overwriting the
+last with no signal that the ground was unstable. Mark such statements as provisional, or withhold
+them until they are checked.
+
 ## Start-of-session sync check
 
 Before doing any work in a new session, run `git fetch` and compare the local branch against its
