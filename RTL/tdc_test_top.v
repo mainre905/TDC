@@ -215,12 +215,18 @@ module tdc_test_top #(
     wire [8:0]  raw_ts_fine_idx; 
     wire        raw_ts_valid;
     
+    // 탭 소스 전환 : tdc_fmcw_core(O/XOR 출력) <-> tdc_fmcw_core_co(CO/캐리 출력)
+    //   모듈명 한 단어만 바꾸면 된다. 포트와 내부 인스턴스 이름이 동일하므로
+    //   tdc.xdc 의 LOC/BEL 제약이 양쪽 모두에 그대로 적용된다.
+    //   실측(2026-08-04, 빌드 통제 완료) : INL p-p 155.8(O) -> 96.8(CO) ps,
+    //   40->80 C 무보정 드리프트 69.7(O) -> 8.3(CO) ps. 상세는
+    //   Markdown/2026-08-04_report.md §2-7 / §3-5 참조.
     tdc_fmcw_core u_tdc (
-        .clk         (tdc_clk), 
-        .rst_n       (clk_locked), 
-        .hit         (tdc_hit_in), 
-        .ts_coarse   (raw_ts_coarse), 
-        .ts_fine_idx (raw_ts_fine_idx), 
+        .clk         (tdc_clk),
+        .rst_n       (clk_locked),
+        .hit         (tdc_hit_in),
+        .ts_coarse   (raw_ts_coarse),
+        .ts_fine_idx (raw_ts_fine_idx),
         .ts_valid    (raw_ts_valid)
     );
     
