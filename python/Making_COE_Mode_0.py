@@ -29,7 +29,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 if CAL_CSV:
     csv_filepath = os.path.join(script_dir, CAL_CSV)
 else:
-    cands = sorted(glob.glob(os.path.join(script_dir, "tap_histogram_*.csv")))
+    cands = sorted(glob.glob(os.path.join(script_dir, "tap_histogram_20260820_084828.csv")))
     if not cands:
         print("❌ tap_histogram_*.csv 가 없습니다. Histogram.py를 먼저 실행하세요.")
         exit()

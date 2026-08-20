@@ -23,8 +23,8 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 
 # 처리할 캡처 파일: (라벨, 파일명). 없으면 무시.
 CAPTURES = [
-    ("BEFORE (linear COE)", "before_capture.csv"),
-    ("AFTER (code-density COE)", "after_capture.csv"),
+    ("BEFORE (linear COE)", "before_capture_1.csv"),
+    ("AFTER (code-density COE)", "after_capture_1.csv"),
 ]
 
 

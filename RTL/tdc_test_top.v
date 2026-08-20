@@ -21,6 +21,7 @@ module tdc_test_top #(
     wire clk_200_fixed, clk_200_shifted, clk_locked;
     wire psen, psincdec, psdone, ps_busy; 
     wire [8:0] current_loop_cnt; 
+    wire loop_updated_toggle; // ★ 2026-08-19 추가: 1단 CDC용 토글 와이어
 
     clk_wiz_0 u_clk (
         .clk_in1  (clk_125), 
@@ -35,14 +36,15 @@ module tdc_test_top #(
     );
     
     mmcm_phase_shifter u_ps_ctrl (
-        .clk         (clk_200_fixed), 
-        .rst_n       (clk_locked), 
-        .start_shift (btn_shift), 
-        .psen        (psen), 
-        .psincdec    (psincdec), 
-        .psdone      (psdone), 
-        .busy        (ps_busy), 
-        .loop_cnt    (current_loop_cnt)
+        .clk                 (clk_200_fixed), 
+        .rst_n               (clk_locked), 
+        .start_shift         (btn_shift), 
+        .psen                (psen), 
+        .psincdec            (psincdec), 
+        .psdone              (psdone), 
+        .busy                (ps_busy), 
+        .loop_cnt            (current_loop_cnt),
+        .loop_updated_toggle (loop_updated_toggle) // ★ 2026-08-19 추가
     );
 
     // [Mode 0용] Calibration Test Hit Sync
@@ -357,27 +359,53 @@ module tdc_test_top #(
     //   ★ ila_0 IP를 재구성할 것: probe2 폭 32 → 48비트 (final_timestamp_ps[47:0] 수용).
     //     나머지 probe 폭(1/9/9/9)은 그대로.
     // (1) MMCM 스텝(loop_cnt) 변경 감지 및 단발성 트리거 생성 로직
-    reg [8:0] prev_loop_cnt;
-    reg       capture_arm; // 스텝이 바뀌면 장전(Arm)되는 플래그
+    //
+    // ==========================================================
+    // ★ [2026-08-19 CDC 1단 동기화 수정] 
+    // 기존의 멀티비트 current_loop_cnt 직접 비교 조건(current_loop_cnt != prev_loop_cnt)은
+    // 이종 클럭(clk_200_fixed -> tdc_clk) 간 비동기 샘플링 및 버스 스큐 문제로 인해 
+    // 메타스테빌리티 및 유령 값 인식으로 loop_cnt 결손/중복 트리거를 유발했습니다.
+    // 이에 mmcm_phase_shifter에서 생성된 1비트 loop_updated_toggle 신호를 
+    // 1단 FF(ASYNC_REG)로 동기화하여 스텝당 단 1회의 capture_trigger만 안전하게 생성합니다.
+    // ==========================================================
+    
+    (* ASYNC_REG = "TRUE" *) reg toggle_sync_d1 = 1'b0; // 1단 CDC 동기 레지스터
+    reg toggle_sync_d2 = 1'b0;                          // 에지 판별용 1클럭 지연
 
     always @(posedge tdc_clk or negedge clk_locked) begin
         if (!clk_locked) begin
-            prev_loop_cnt <= 9'd0;
-            capture_arm   <= 1'b0;
+            toggle_sync_d1 <= 1'b0;
+            toggle_sync_d2 <= 1'b0;
         end else begin
-            prev_loop_cnt <= current_loop_cnt;
-            
-            // 스텝 카운트가 증가하는 순간 캡처 준비(Arm)
-            if (current_loop_cnt != prev_loop_cnt) begin
-                capture_arm <= 1'b1;
+            toggle_sync_d1 <= loop_updated_toggle; // ★ 1단 FF CDC 동기화
+            toggle_sync_d2 <= toggle_sync_d1;       // 에지 검출용
+        end
+    end
+
+    // 스텝 변경 에지 검출 펄스
+    wire step_changed_pulse = (toggle_sync_d1 ^ toggle_sync_d2);
+
+    reg [8:0] current_loop_cnt_stable = 9'd0;
+    reg       capture_arm             = 1'b0; // 스텝이 바뀌면 장전(Arm)되는 플래그
+
+    always @(posedge tdc_clk or negedge clk_locked) begin
+        if (!clk_locked) begin
+            capture_arm             <= 1'b0;
+            current_loop_cnt_stable <= 9'd0;
+        end else begin
+            // 스텝 카운트가 토글 신호로 전달되는 순간 캡처 준비(Arm) 및 안정값 래치
+            if (step_changed_pulse) begin
+                capture_arm             <= 1'b1;
+                current_loop_cnt_stable <= current_loop_cnt; // 스텝 안정값 래치
             end 
             // 캡처 준비가 된 상태에서 첫 번째 유효한 데이터가 나오면 트리거 발동 후 장전 해제
             else if (capture_arm && final_ts_valid) begin
-                capture_arm <= 1'b0; 
+                capture_arm             <= 1'b0; 
             end
         end
     end
-   wire capture_trigger = (capture_arm && final_ts_valid);
+
+    wire capture_trigger = (capture_arm && final_ts_valid);
 
    //ila_0 your_ila_instance (
      //   .clk    (tdc_clk),
@@ -393,7 +421,7 @@ module tdc_test_top #(
         
         // --- [INL 측정용 프로브 그룹] ---
         .probe0 (capture_trigger),           // [0:0]  INL 캡처 조건 (1일 때 캡처)
-        .probe2 (current_loop_cnt),          // [8:0]  INL X축: 스텝 번호
+        .probe2 (current_loop_cnt_stable),   // [8:0]  ★ [2026-08-19 수정] 동기화된 안전 스텝 번호
         .probe3 (final_timestamp_ps[47:0]),  // [47:0] INL Y축: 절대 시간
         
         // --- [COE 추출을 위한 히스토그램 프로브 그룹 CODE DENSITY TEST] ---

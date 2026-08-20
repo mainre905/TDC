@@ -8,7 +8,7 @@ import datetime  # 날짜 및 시간 생성을 위한 라이브러리 추가
 # 1. 파일 경로 설정
 # ---------------------------------------------------------
 script_dir = os.path.dirname(os.path.abspath(__file__))
-csv_filepath = os.path.join(script_dir, "co_histo_40_2.csv")
+csv_filepath = os.path.join(script_dir, "ro_val2.csv")
 
 def main():
     print(f"[*] Reading data from: {csv_filepath}")
