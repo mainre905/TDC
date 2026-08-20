@@ -390,47 +390,100 @@ module tdc_test_top #(
     // 기존의 멀티비트 current_loop_cnt 직접 비교 조건(current_loop_cnt != prev_loop_cnt)은
     // 이종 클럭(clk_200_fixed -> tdc_clk) 간 비동기 샘플링 및 버스 스큐 문제로 인해 
     // 메타스테빌리티 및 유령 값 인식으로 loop_cnt 결손/중복 트리거를 유발했습니다.
-    // 이에 mmcm_phase_shifter에서 생성된 1비트 loop_updated_toggle 신호를 
-    // 1단 FF(ASYNC_REG)로 동기화하여 스텝당 단 1회의 capture_trigger만 안전하게 생성합니다.
+    // 이에 mmcm_phase_shifter에서 생성된 1비트 loop_updated_toggle 신호를
+    // FF로 동기화하여 스텝당 단 1회의 capture_trigger만 안전하게 생성합니다.
+    //
+    // ★ [2026-08-20 수정 ①] 동기화기를 1단 -> 2단으로.
+    //   무엇이 문제였나 : toggle_sync_d1 이 비동기 신호를 직접 받는데, 그 값이 곧바로
+    //     XOR 에 들어가고 있었다. d1 이 메타스테이블이면 그대로 펄스로 전파된다.
+    //     d2 는 메타스테이빌리티 해소용이 아니라 에지 검출용 지연이었다.
+    //   같은 파일의 다른 두 CDC 경로는 이미 제대로 돼 있다 —
+    //     ps_busy : d1,d2 동기화 + d3 에지검출 (3단)
+    //     RO      : ro_sync_d1, ro_sync_d2 둘 다 ASYNC_REG
+    //   이 경로만 한 단 부족했다. d1·d2 를 동기화 2단으로 쓰고 d3 를 에지검출로 분리한다.
+    //   d1,d2 둘 다 ASYNC_REG 여야 배치기가 두 FF 을 밀착시켜 해소 시간을 확보한다.
+    //   비용 : FF 1개, 지연 1클럭(5 ns). 스텝 체류가 10 ms 이므로 무의미하다.
+    //   주의 : 2026-08-20 실측(6캡처 x 280스텝)에서 결손·중복은 0 이었다. 관측된
+    //          고장을 고치는 것이 아니라 여유를 확보하는 예방적 수정이다.
     // ==========================================================
-    
-    (* ASYNC_REG = "TRUE" *) reg toggle_sync_d1 = 1'b0; // 1단 CDC 동기 레지스터
-    reg toggle_sync_d2 = 1'b0;                          // 에지 판별용 1클럭 지연
+
+    (* ASYNC_REG = "TRUE" *) reg toggle_sync_d1 = 1'b0; // 동기화 1단 (비동기 입력)
+    (* ASYNC_REG = "TRUE" *) reg toggle_sync_d2 = 1'b0; // 동기화 2단 ★2026-08-20 추가
+    reg                      toggle_sync_d3 = 1'b0;     // 에지 검출용 1클럭 지연
 
     always @(posedge tdc_clk or negedge clk_locked) begin
         if (!clk_locked) begin
             toggle_sync_d1 <= 1'b0;
             toggle_sync_d2 <= 1'b0;
+            toggle_sync_d3 <= 1'b0;
         end else begin
-            toggle_sync_d1 <= loop_updated_toggle; // ★ 1단 FF CDC 동기화
-            toggle_sync_d2 <= toggle_sync_d1;       // 에지 검출용
+            toggle_sync_d1 <= loop_updated_toggle; // CDC 1단
+            toggle_sync_d2 <= toggle_sync_d1;      // CDC 2단 (메타스테빌리티 해소)
+            toggle_sync_d3 <= toggle_sync_d2;      // 에지 검출용
         end
     end
 
-    // 스텝 변경 에지 검출 펄스
-    wire step_changed_pulse = (toggle_sync_d1 ^ toggle_sync_d2);
+    // 스텝 변경 에지 검출 펄스 — 해소가 끝난 d2/d3 로 만든다
+    wire step_changed_pulse = (toggle_sync_d2 ^ toggle_sync_d3);
+
+    // ==========================================================
+    // ★ [2026-08-20 수정 ②] 스텝당 1샘플 -> CAP_PER_STEP 샘플
+    //
+    //   무엇이 문제였나 : 위상 스텝 하나에 히트가 20만 개(10 ms / 50 ns) 지나가는데
+    //     capture_arm 이 첫 히트에서 바로 해제되어 ILA 에 1개만 저장됐다. 그 1개는
+    //     양자화된 값이라 반드시 어느 탭 하나의 값으로만 나온다.
+    //
+    //   실측 근거 (2026-08-20, python/test_20260820/) :
+    //     반복 3회 캡처로 잰 점당 측정 잡음  sigma_n = 7.79 ps (before) / 7.89 ps (after)
+    //     이 값은 히스토그램에서 유도한 양자화 한계 8.20 ps 와 일치한다.
+    //       8.20 = sqrt( sum(w[i]^2 * p[i]) / 12 ),  w=탭 폭, p=h[i]/H
+    //     DNL 은 이웃 점의 차이라 잡음이 sqrt(2) 배 :
+    //       0.62 LSB = sqrt(2) x 7.79 / 17.857     <- 측정된 DNL rms 1.10 LSB 의 절반
+    //       실제 DNL rms = sqrt(1.10^2 - 0.62^2) = 0.91 LSB
+    //     즉 DNL 측정값의 절반 가까이가 측정 잡음이었다.
+    //
+    //   왜 여러 번 재면 나아지나 : 한 번 재면 탭 값밖에 못 얻지만, 여러 번 재서 평균하면
+    //     탭 사이를 읽어낸다. 실제로 jitter_100.csv 에서 820 히트의 평균이 277.81 ps 로
+    //     나왔는데 이는 탭 272 와 282 사이의 값이다 (어느 탭에도 없는 값).
+    //     K 개를 평균하면 잡음이 sqrt(K) 배 줄어든다.
+    //
+    //   K 선택 : ILA depth 8192 가 상한이다 (XC7Z010 BRAM 60개 x 36Kb = 2,211,840 비트,
+    //     probe9 추가 후 프로브 폭 합계 181 비트 -> depth 16384 는 2,965,504 비트로 초과).
+    //     280 스텝 x K <= 8192  ->  K <= 29.
+    //       K=16 : 4,480 샘플 (55 %), 점당 1.95 ps, DNL 잡음 0.15 LSB
+    //       K=24 : 6,720 샘플 (82 %), 점당 1.59 ps, DNL 잡음 0.13 LSB
+    //     여유를 두어 16 을 기본으로 한다. 필요하면 이 값만 바꾸면 된다.
+    //     ※ 실제 BRAM 사용량은 ILA IP GUI 또는 report_utilization 으로 확인할 것.
+    //
+    //   주의 : 이것은 TDC 성능을 올리는 수정이 아니라 TDC 를 더 정확히 재기 위한
+    //          측정 방법 수정이다. 탭 폭도 지터도 바뀌지 않는다.
+    //
+    //   분석 : 파이썬에서 같은 current_loop_cnt_stable 끼리 묶어 평균낼 것.
+    //          df.groupby('current_loop_cnt_stable')['fine'].mean()
+    // ==========================================================
+    localparam [4:0] CAP_PER_STEP = 5'd16;   // 스텝당 저장할 히트 수 (1~29)
 
     reg [8:0] current_loop_cnt_stable = 9'd0;
-    reg       capture_arm             = 1'b0; // 스텝이 바뀌면 장전(Arm)되는 플래그
+    reg [4:0] cap_cnt                 = 5'd0; // ★2026-08-20 : capture_arm(1비트) 대체
 
     always @(posedge tdc_clk or negedge clk_locked) begin
         if (!clk_locked) begin
-            capture_arm             <= 1'b0;
+            cap_cnt                 <= 5'd0;
             current_loop_cnt_stable <= 9'd0;
         end else begin
-            // 스텝 카운트가 토글 신호로 전달되는 순간 캡처 준비(Arm) 및 안정값 래치
+            // 스텝이 바뀌는 순간 CAP_PER_STEP 발 장전 + 스텝 안정값 래치
             if (step_changed_pulse) begin
-                capture_arm             <= 1'b1;
-                current_loop_cnt_stable <= current_loop_cnt; // 스텝 안정값 래치
-            end 
-            // 캡처 준비가 된 상태에서 첫 번째 유효한 데이터가 나오면 트리거 발동 후 장전 해제
-            else if (capture_arm && final_ts_valid) begin
-                capture_arm             <= 1'b0; 
+                cap_cnt                 <= CAP_PER_STEP;
+                current_loop_cnt_stable <= current_loop_cnt;
+            end
+            // 유효 데이터가 나올 때마다 1발씩 소모. 0 이 되면 그 스텝의 캡처 종료
+            else if (cap_cnt != 5'd0 && final_ts_valid) begin
+                cap_cnt <= cap_cnt - 1'b1;
             end
         end
     end
 
-    wire capture_trigger = (capture_arm && final_ts_valid);
+    wire capture_trigger = (cap_cnt != 5'd0) && final_ts_valid;
 
    //ila_0 your_ila_instance (
      //   .clk    (tdc_clk),
