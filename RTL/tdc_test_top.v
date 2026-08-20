@@ -23,6 +23,31 @@ module tdc_test_top #(
     wire [8:0] current_loop_cnt; 
     wire loop_updated_toggle; // ★ 2026-08-19 추가: 1단 CDC용 토글 와이어
 
+    // ==========================================================
+    // ★ 2026-08-20 추가 — Device DNA(칩 고유 ID) 보드 식별자
+    //
+    //  왜: Zybo 보드가 2대(회사/집)인데 캡처 CSV에 어느 보드인지 기록이 없었다.
+    //      두 칩은 공정 편차로 지연선이 다르다 — 실측:
+    //        집  보드  유효탭 299  LSB 16.722 ps  (8/04, 8/09, 8/12, 8/13)
+    //        회사 보드  유효탭 284  LSB 17.606 ps  (8/06 온도셋, 8/20)
+    //        같은 칩끼리 탭 폭 상관 r=0.999 (빌드가 달라도), 다른 칩끼리 r=0.54
+    //      CARRY4 와 FF 이 tdc.xdc 로 같은 슬라이스에 고정돼 있어 탭 폭은 그
+    //      슬라이스의 실리콘이 정한다. 보드가 바뀌면 지연선이 바뀐다.
+    //      이 값을 ILA 에 찍어 모든 캡처에 보드 식별자를 영구히 남긴다.
+    //      상세는 RTL/dna_reader.v 헤더 참조.
+    // ==========================================================
+    wire [56:0] device_dna;
+    wire        device_dna_valid;
+
+    dna_reader #(
+        .CLK_DIV (16)                 // 200 MHz / 16 = 12.5 MHz (보수적)
+    ) u_dna (
+        .clk       (clk_200_fixed),
+        .rst_n     (clk_locked),
+        .dna       (device_dna),
+        .dna_valid (device_dna_valid)
+    );
+
     clk_wiz_0 u_clk (
         .clk_in1  (clk_125), 
         .reset    (rst_n),  
@@ -435,7 +460,16 @@ module tdc_test_top #(
         //   같은 값이 1024번 중복될 뿐 변동을 볼 수 없음)
         .probe6 (ro_meas_cnt),               // [31:0] 게이트(10ms)당 RO 에지 수
         .probe7 (meas_strobe),               // [0:0]  자격저장/트리거 조건
-        .probe8 (die_temp_at_meas)           // [15:0] XADC 다이 온도 (raw)
+        .probe8 (die_temp_at_meas),          // [15:0] XADC 다이 온도 (raw)
+
+        // --- [보드 식별] 2026-08-20 추가 ---
+        //   ★ ila_0 IP 를 재구성할 것: probe 수 9 -> 10, probe9 폭 32비트.
+        //     기존 probe0~8 의 폭은 그대로 두면 된다.
+        //   구성 : {dna_valid, device_dna[30:0]}
+        //     최상위 1비트가 0이면 아직 읽는 중이거나 실패한 것이니 그 캡처의
+        //     보드 식별값은 믿지 말 것. 정상이면 리셋 후 수 us 안에 1이 된다.
+        //     31비트만 뽑아도 보드 2대를 구분하기에는 충분하다.
+        .probe9 ({device_dna_valid, device_dna[30:0]})   // [31:0] 보드 식별자
     );
   
 
