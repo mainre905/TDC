@@ -248,7 +248,9 @@ module tdc_test_top #(
     //   실측(2026-08-04, 빌드 통제 완료) : INL p-p 155.8(O) -> 96.8(CO) ps,
     //   40->80 C 무보정 드리프트 69.7(O) -> 8.3(CO) ps. 상세는
     //   Markdown/2026-08-04_report.md §2-7 / §3-5 참조.
-    tdc_fmcw_core u_tdc (
+    // ★ 2026-08-22 : tdc_fmcw_core(O 탭) -> tdc_fmcw_core_co(CO 탭) 로 전환.
+    //   집 보드 CO 단일 지연선 캠페인(Markdown/2026-08-22_home_board_campaign.md) 대상이다.
+    tdc_fmcw_core_co u_tdc (
         .clk         (tdc_clk),
         .rst_n       (clk_locked),
         .hit         (tdc_hit_in),

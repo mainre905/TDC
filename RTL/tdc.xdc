@@ -49,8 +49,33 @@ set_property ASYNC_REG true [get_cells -hierarchical -filter {NAME =~ *u_tdc*CAR
 set_property DONT_TOUCH true [get_cells -hierarchical -filter {NAME =~ *taps_sampled_d1_reg*}]
 set_property ASYNC_REG true [get_cells -hierarchical -filter {NAME =~ *taps_sampled_d1_reg*}]
 
-# [수정] 출력(O)에서 DFF의 입력(D)으로 가는 경로 강제 밀착 (0.150ns)
-set_max_delay -datapath_only -from [get_pins -hierarchical -filter {NAME =~ *u_tdc*u_carry4/O*}] -to [get_pins -hierarchical -filter {NAME =~ *u_tdc*CARRY_CHAIN*u_ff_*/D}] 0.150
+# ==========================================================================
+# ★ 2026-08-22 삭제 — 아래 set_max_delay 한 줄을 제거했다.
+#
+#   지웠던 줄:
+#     set_max_delay -datapath_only \
+#       -from [get_pins -hierarchical -filter {NAME =~ *u_tdc*u_carry4/O*}] \
+#       -to   [get_pins -hierarchical -filter {NAME =~ *u_tdc*CARRY_CHAIN*u_ff_*/D}] 0.150
+#
+#   [왜 지웠나]
+#   (1) 아무 효과가 없다. 바로 아래 set_false_path -through *carry_o* 가 같은 경로를
+#       덮는데, false_path 가 max_delay 를 이긴다. 2026-08-13 실측으로 확인했다 —
+#       이 경로들은 datapath 0.000 ns, WNS 0.000 으로 타이밍 분석에서 제외돼 있었다.
+#   (2) CO 빌드와는 아예 무관하다. *u_carry4/O* 는 O(XOR) 출력을 겨냥하는데
+#       tdc_fmcw_core_co 는 탭을 carry_co(캐리 출력)에서 뽑는다.
+#   (3) Critical Warning 을 320개(80단 x O[0..3]) 쏟아낸다.
+#       [Constraints 18-515] set_max_delay: Path segmentation by forcing
+#         'u_tdc/CARRY_CHAIN[k].STAGE_*.u_carry4/O[j]' to be timing startpoint.
+#       O[j] 는 조합 출력 핀이라 정상적인 타이밍 시작점이 아니다. -from 으로 지정하면
+#       Vivado 가 그 지점에서 경로를 잘라(segmentation) 상류(캐리 전파)의 도착 시각을
+#       버린다. 경고가 320개 쌓이면 진짜 경고가 묻힌다.
+#
+#   [영향] 기능·배치·배선 모두 변화 없을 것으로 예상한다. 다만 이번 빌드는 코어를
+#   O -> CO 로 바꾼 새 빌드이므로 어차피 이전 빌드와 P&R 이 다르다. 탭 폭은
+#   CARRY4·FF 이 LOC/BEL 로 고정돼 실리콘이 정하므로 바뀌지 않아야 한다 —
+#   빌드 후 히스토그램을 python/co_histo_back.csv(집 보드 8/13) 와 대조해 r > 0.99 를
+#   확인할 것. (Markdown/2026-08-22_home_board_campaign.md §3-4)
+# ==========================================================================
 
 set_false_path -through [get_nets -hierarchical -filter {NAME =~ *carry_o*}]
 set_false_path -through [get_nets -hierarchical -filter {NAME =~ *carry_co*}]
