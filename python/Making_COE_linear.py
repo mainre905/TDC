@@ -19,7 +19,9 @@ ROM_MAX_VALUE  = 8191
 EDGE_TRIM_FRAC = 0.05
 SOURCE_TAG     = "linear"        # tdc_calib_linear_rom.coe 로 보관
 
-CAL_CSV = None   # None이면 최신 tap_histogram_*.csv (유효 구간 검출용)
+# ★ 2026-08-22 수정 — CAL_CSV 명시. code-density LUT 와 '같은 유효 구간'을 써야
+#   BEFORE/AFTER 비교가 공정하므로 Making_COE_Mode_0.py 와 반드시 같은 파일을 쓸 것.
+CAL_CSV = "tap_histogram_ro_cal.csv"   # 집 보드 2026-08-22 Build 1 cal
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 

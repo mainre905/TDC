@@ -17,7 +17,12 @@ ROM_MAX_VALUE  = 8191      # 13비트 상한
 EDGE_TRIM_FRAC = 0.05      # 유효 구간 끝단 컷 (평균의 5% 미만인 양 끝 bin 제거)
 
 # Calibration set: COE를 만들 raw 히스토그램. None이면 가장 최근 파일.
-CAL_CSV = None   # None이면 가장 최근 tap_histogram_*.csv 자동 선택
+# ★ 2026-08-22 수정 — CAL_CSV 를 명시 지정한다.
+#   왜 : None(자동 최신) 은 위험하다. 방금 만든 val 파일이 최신이면 val 로 LUT 를
+#        만들게 되고, 그러면 cal/val 분리가 깨져 교정 품질이 아니라 자기 일관성을 재게 된다.
+#        Histogram.py 가 출력명을 입력명에서 물려받도록 바뀌었으므로(2026-08-22) 이름이
+#        결정적이다.
+CAL_CSV = "tap_histogram_ro_cal.csv"   # 집 보드 2026-08-22 Build 1 cal
 
 # 출력 COE 구분 태그 (DPS vs Ring Osc 비교용 보관 파일명).
 #   → tdc_calib_<SOURCE_TAG>_rom.coe 로 별도 보관.
@@ -29,7 +34,9 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 if CAL_CSV:
     csv_filepath = os.path.join(script_dir, CAL_CSV)
 else:
-    cands = sorted(glob.glob(os.path.join(script_dir, "tap_histogram_20260820_084828.csv")))
+    # ★ 2026-08-22 : 특정 파일명이 하드코딩돼 있던 것을 원래의 와일드카드로 되돌림.
+    #   (CAL_CSV 를 명시하면 이 분기는 실행되지 않는다)
+    cands = sorted(glob.glob(os.path.join(script_dir, "tap_histogram_*.csv")))
     if not cands:
         print("❌ tap_histogram_*.csv 가 없습니다. Histogram.py를 먼저 실행하세요.")
         exit()

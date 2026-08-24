@@ -17,8 +17,11 @@ NUM_TOTAL_TAPS = 320
 EDGE_TRIM_FRAC = 0.05      # 유효 구간 양 끝단 컷 (평균의 5% 미만)
 
 # cal/val 분리 (같은 빌드의 독립 측정 → 순환논리 회피)
-CAL_CSV = "tap_histogram_20260820_084828.csv"   # LUT(교정) 생성용
-VAL_CSV = "tap_histogram_20260820_090240.csv"   # 평가용
+# ★ 2026-08-22 수정 — 집 보드 Build 1 (data/Test_20260822/) 데이터로 교체.
+#   Histogram.py 출력명이 입력명을 물려받도록 바뀌어 이름이 결정적이다.
+#   VAL 을 ro_val2 로 바꿔 한 번 더 돌려 재현성을 볼 것.
+CAL_CSV = "tap_histogram_ro_cal.csv"    # LUT(교정) 생성용 — Making_COE_* 와 동일해야 함
+VAL_CSV = "tap_histogram_ro_val1.csv"   # 평가용 (독립 캡처)
 
 # AFTER 출력 격자 수. None이면 유효 code 수와 동일(=LSB 유지). 작게 주면 bin merging(해상도↓, DNL↑개선).
 M_OUT = None

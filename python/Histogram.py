@@ -7,8 +7,14 @@ import datetime  # 날짜 및 시간 생성을 위한 라이브러리 추가
 # ---------------------------------------------------------
 # 1. 파일 경로 설정
 # ---------------------------------------------------------
+# ★ 2026-08-22 수정 — 측정 데이터가 python/ 에서 data/<세션폴더>/ 로 옮겨졌다.
+#   DATA_SUBDIR + INPUT_CSV 두 상수만 고치면 되도록 분리했다.
+#   DATA_SUBDIR 를 "" 로 두면 예전처럼 python/ 폴더를 본다.
+DATA_SUBDIR = os.path.join("..", "data", "Test_20260822")
+INPUT_CSV   = "ro_val2.csv"        # ← 캡처마다 이것만 바꿔 3회 실행
+
 script_dir = os.path.dirname(os.path.abspath(__file__))
-csv_filepath = os.path.join(script_dir, "ro_val2.csv")
+csv_filepath = os.path.join(script_dir, DATA_SUBDIR, INPUT_CSV)
 
 def main():
     print(f"[*] Reading data from: {csv_filepath}")
@@ -107,8 +113,17 @@ def main():
     # ---------------------------------------------------------
     # 6. 각 탭별 데이터를 새로운 CSV 파일로 내보내기 (현재 시간 기준)
     # ---------------------------------------------------------
-    current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S") # 예: 20231024_153045
-    output_filename = f"tap_histogram_{current_time}.csv"
+    # ★ 2026-08-22 수정 — 출력 파일명을 '시각' 대신 '입력 파일 이름'으로 짓는다.
+    #   왜 : 시각 기반이면 실행할 때마다 이름이 달라져, 뒤따르는
+    #        Making_COE_Mode_0.py / Making_COE_linear.py / DNL_INL_codedensity.py 의
+    #        CAL_CSV·VAL_CSV 를 매번 손으로 다시 채워야 했다. 그 과정에서 cal 대신
+    #        val 이 들어가는 사고가 나기 쉽다(그 둘을 섞으면 교정 품질이 아니라
+    #        자기 일관성을 재게 된다).
+    #        입력 이름을 물려받으면 ro_cal.csv -> tap_histogram_ro_cal.csv 로 결정적이라
+    #        하류 스크립트에 이름을 미리 박아둘 수 있다.
+    #   참고 : 같은 입력으로 다시 돌리면 덮어쓴다(의도된 동작).
+    stem = os.path.splitext(os.path.basename(csv_filepath))[0]
+    output_filename = f"tap_histogram_{stem}.csv"
     output_filepath = os.path.join(script_dir, output_filename)
     
     # DataFrame 생성 및 저장
