@@ -11,6 +11,22 @@
 
 회사에는 ZedBoard 가 있고 Claude 를 쓸 수 없다. **혼자서 끝까지 진행할 수 있도록** 필요한 것을 전부 적었다. 막히면 §7 문제 해결을 먼저 볼 것.
 
+**빌드에 쓸 파일 — 이것만 프로젝트에 넣는다 (상세는 §2-1)**
+
+```
+RTL/tdc_zedboard_top.v     ← Set as Top
+RTL/tdc_test_top.v
+RTL/tdc_fmcw_core_co.v
+RTL/tdc_timestamp_calc.v
+RTL/tdc_histogram.v
+RTL/phase_shifter.v
+RTL/dna_reader.v
+RTL/tdc_zedboard.xdc
+```
+
+**넣지 말 것**: `tdc.xdc`(Zybo 핀), `tdc_fmcw_core.v`, `tdc_fmcw_core_co_thermo.v`,
+`tdc_fmcw_core_mix.v`, `tdc_fmcw_core_mix_thermo.v`
+
 **오늘 준비된 것**
 
 | 파일 | 상태 |
@@ -45,20 +61,39 @@ ZedBoard 기본값은 **1.8V** 다. FMC 뱅크 34/35 의 VCCO 가 2.5V 여야:
 ## 2. Vivado 프로젝트 생성
 
 1. **New Project** → RTL Project → part **`xc7z020clg484-1`**
-2. **소스 파일 7개 추가** (`RTL/` 에서)
 
-```
-tdc_zedboard_top.v      ← 최상위로 지정할 것 (Set as Top)
-tdc_test_top.v
-tdc_fmcw_core_co.v
-tdc_timestamp_calc.v
-tdc_histogram.v          (안에 tdc_bram_512x32 도 들어있음)
-phase_shifter.v          (안에 mmcm_phase_shifter)
-dna_reader.v
-```
+### 2-1. ★ 추가할 소스 파일 — 정확히 이 7개만
 
-3. **제약 파일 추가**: `RTL/tdc_zedboard.xdc`
-   → **`tdc.xdc` 는 절대 같이 넣지 말 것** (Zybo 핀이라 충돌한다)
+`RTL/` 폴더에 `.v` 가 11개 있는데 **7개만 쓴다.** 나머지 4개는 옛날 코어 변형이라
+같이 넣으면 모듈 이름 충돌이나 불필요한 합성이 생긴다.
+
+| # | 파일 | 정의하는 모듈 | 역할 |
+|---|---|---|---|
+| 1 | **`tdc_zedboard_top.v`** | `tdc_zedboard_top` | ★ **최상위 (Set as Top 지정)** — LVDS 수신 |
+| 2 | `tdc_test_top.v` | `tdc_test_top` | 코어 전체 (MMCM/RO/XADC/ILA/히스토그램) |
+| 3 | `tdc_fmcw_core_co.v` | `tdc_fmcw_core_co` | 지연선 — **CO 탭** 버전 |
+| 4 | `tdc_timestamp_calc.v` | `tdc_timestamp_calc` | ROM 조회 + 타임스탬프 계산 |
+| 5 | `tdc_histogram.v` | `tdc_histogram`, `tdc_bram_512x32` | 코드밀도 히스토그램 (BRAM 포함) |
+| 6 | `phase_shifter.v` | `mmcm_phase_shifter` | MMCM 위상 스윕 (Mode 0) |
+| 7 | `dna_reader.v` | `dna_reader` | 보드 식별자 |
+
+### 2-2. ★ 넣으면 안 되는 파일
+
+| 파일 | 이유 |
+|---|---|
+| `tdc_fmcw_core.v` | 옛 **O 탭** 버전. 2026-08-22 에 CO 로 전환했다 |
+| `tdc_fmcw_core_co_thermo.v` | thermometer 디버그 전용 (프로브가 다름) |
+| `tdc_fmcw_core_mix.v` | 혼합 탭 실험 버전 |
+| `tdc_fmcw_core_mix_thermo.v` | 위의 thermo 판 |
+| **`tdc.xdc`** | **Zybo 핀이라 ZedBoard 와 충돌한다. 절대 넣지 말 것** |
+
+### 2-3. 제약 파일
+
+`RTL/tdc_zedboard.xdc` **하나만** 추가한다.
+
+> **넣은 뒤 확인**: Sources 창에서 Verilog 7개 + XDC 1개인지, `tdc_zedboard_top` 이
+> 굵게(top) 표시되는지 볼 것. `tdc_test_top` 이 top 으로 잡혀 있으면 LVDS 포트가
+> 없어서 핀 제약 에러가 난다.
 
 ### IP 4개 생성
 
@@ -313,15 +348,22 @@ VALID_TAP_HI = 290     # ← 이 숫자를 바꿔가며 반복
 
 ```
 RTL/
- ├ tdc_zedboard_top.v      ★ ZedBoard 최상위 (Set as Top)
- ├ tdc_zedboard.xdc        ★ ZedBoard 제약
+ ── 프로젝트에 추가할 것 (Verilog 7 + XDC 1 = 8개) ──────────
+ ├ tdc_zedboard_top.v      ★ 최상위 (Set as Top 으로 지정)
  ├ tdc_test_top.v            코어 (건드리지 말 것)
- ├ tdc_fmcw_core_co.v
+ ├ tdc_fmcw_core_co.v        지연선 — CO 탭 버전
  ├ tdc_timestamp_calc.v
- ├ tdc_histogram.v
- ├ phase_shifter.v
+ ├ tdc_histogram.v           (tdc_bram_512x32 포함)
+ ├ phase_shifter.v           (mmcm_phase_shifter)
  ├ dna_reader.v
- └ tdc.xdc                  Zybo 전용 (ZedBoard 프로젝트에 넣지 말 것)
+ └ tdc_zedboard.xdc        ★ ZedBoard 제약
+
+ ── 넣지 말 것 (5개) ─────────────────────────────────────
+   tdc.xdc                    Zybo 핀 — 충돌한다
+   tdc_fmcw_core.v            옛 O 탭 버전 (8/22 에 CO 로 전환)
+   tdc_fmcw_core_co_thermo.v  thermometer 디버그 전용
+   tdc_fmcw_core_mix.v        혼합 탭 실험
+   tdc_fmcw_core_mix_thermo.v 위의 thermo 판
 
 python/
  ├ Histogram.py             DATA_SUBDIR / INPUT_CSV 수정 후 사용
