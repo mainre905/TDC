@@ -7,3 +7,4 @@ loopcnt_tap_time.csv
 *coe
 __pycache__/
 *.pyc
+*.bak

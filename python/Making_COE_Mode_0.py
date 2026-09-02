@@ -24,6 +24,42 @@ EDGE_TRIM_FRAC = 0.05      # 유효 구간 끝단 컷 (평균의 5% 미만인 �
 #        결정적이다.
 CAL_CSV = "tap_histogram_ro_cal.csv"   # 집 보드 2026-08-22 Build 1 cal
 
+# =========================================================================
+# ★ 2026-09-02 추가 — 유효탭 상한/하한 수동 지정 (VALID_TAP_LO / VALID_TAP_HI)
+#
+#   [무엇이 문제였나]
+#   아래 §2 의 자동 검출(EDGE_TRIM_FRAC = 평균의 5% 미만 끝단 컷)은
+#   "히트가 충분히 있는 칸"을 유효로 잡는다. 그런데 링오실레이터(Mode 1)는
+#   위상 스윕(Mode 0)이 한 주기 안에 도달하지 못하는 끝단 칸에도 히트를 쌓는다.
+#   Mode 1 은 히트가 계속 반복되어 캐리가 어쩌다 평소보다 빨리 도는 순간까지
+#   잡아내지만, Mode 0 은 위상을 5000 ps 딱 한 바퀴만 훑으므로 구조적으로
+#   그 칸들에 닿을 수 없기 때문이다.
+#
+#   [왜 이게 LUT 를 망가뜨리나]
+#   코드밀도 LUT 는 5000 ps 를 유효 칸들에 나눠 배분한다. 실제로 한 주기 안에
+#   쓰이지 않는 칸에도 몫을 떼주면 나머지 칸이 전부 조금씩 좁게 배정되고,
+#   LUT 는 누적값이라 그 편향이 체인을 따라 쌓여 INL 을 오히려 악화시킨다.
+#
+#   [실측 근거 — 집 보드 XC7Z010, 2026-08-23~24]
+#     자동검출(298칸, 탭 2~299) : Mode 0 INL rms 19.93 ps, 클럭 경계 점프 -26.5 ps
+#     수동지정(293칸, 탭 2~294) : Mode 0 INL rms 10.00 ps, 클럭 경계 점프  +0.6 ps
+#     참고) 무교정 등간격             : Mode 0 INL rms 15.68 ps
+#   자동검출 쪽은 무교정보다도 나빴다. 상세는 Markdown/2026-08-24_report.md §4.
+#
+#   [값을 어떻게 정하나 — 보드마다 다시 구해야 한다]
+#   ZedBoard(XC7Z020)는 다른 칩이므로 293 을 그대로 쓰면 안 된다. 순서는:
+#     (1) Mode 1 빌드로 ro_cal/ro_val1/ro_val2 히스토그램 확보
+#     (2) Mode 0 빌드(선형 COE)로 전달함수 캡처 -> BEFORE 기준선
+#     (3) 아래 VALID_TAP_HI 를 여러 값으로 바꿔가며 COE 를 만들고,
+#         Mode 0 전달함수에서 "클럭 경계 점프"가 0 에 가장 가까운 값을 채택한다.
+#         경계 점프는 INL 을 몰라도 잴 수 있는 독립적인 양이라 순환논법이 아니다.
+#         (INL 최소점과 경계점프 0 이 같은 곳에서 만나는 것을 집 보드에서 확인했다)
+#
+#   None 이면 기존 자동 검출을 그대로 쓴다.
+VALID_TAP_LO = None    # 예: 2     (None = 자동)
+VALID_TAP_HI = None    # 예: 293   (None = 자동)  ← 집 보드는 293, ZedBoard 는 재측정 필요
+# =========================================================================
+
 # 출력 COE 구분 태그 (DPS vs Ring Osc 비교용 보관 파일명).
 #   → tdc_calib_<SOURCE_TAG>_rom.coe 로 별도 보관.
 #   → 동시에 하드웨어 IP가 참조하는 canonical(tdc_calib_mode0_rom.coe)도 항상 함께 생성.
@@ -83,6 +119,26 @@ while lo < NUM_TOTAL_TAPS and counts_full[lo] < thresh:
 hi = NUM_TOTAL_TAPS - 1
 while hi > lo and counts_full[hi] < thresh:
     hi -= 1
+
+# ★ 2026-09-02 : 위에서 자동 검출한 값을 수동 지정으로 덮어쓴다.
+#   지정 이유와 값 정하는 법은 §0 의 VALID_TAP_LO / VALID_TAP_HI 주석 참조.
+_auto_lo, _auto_hi = lo, hi
+if VALID_TAP_LO is not None:
+    lo = int(VALID_TAP_LO)
+if VALID_TAP_HI is not None:
+    hi = int(VALID_TAP_HI)
+if (lo, hi) != (_auto_lo, _auto_hi):
+    print(f"[!] 유효구간 수동 지정 : 자동 {_auto_lo}~{_auto_hi} ({_auto_hi-_auto_lo+1}칸)"
+          f"  ->  지정 {lo}~{hi} ({hi-lo+1}칸)")
+else:
+    print(f"[*] 유효구간 자동 검출 : {lo}~{hi} ({hi-lo+1}칸)")
+
+if not (0 <= lo < hi < NUM_TOTAL_TAPS):
+    print(f"❌ 유효구간이 잘못됐습니다: lo={lo}, hi={hi}")
+    exit()
+if counts_full[lo:hi + 1].sum() <= 0:
+    print(f"❌ 지정한 구간 {lo}~{hi} 에 히트가 없습니다.")
+    exit()
 
 # =========================================================================
 # 3. Cumulative Code-Density LUT 계산
