@@ -9,9 +9,10 @@ module tdc_test_top #(
     parameter integer OPERATION_MODE = 1,
 
     // ★ [2026-09-03 추가] 캐리체인 단수 (탭 수 = CARRY4_STAGES x 4)
-    //   기본 80단 = 320탭 — Zybo 두 대는 이 값을 그대로 쓰므로 기존 빌드와 동일하다.
-    //   ZedBoard 는 tdc_zedboard_top.v 에서 112단(448탭)으로 넘긴다. 이유는
+    //   ZedBoard 는 tdc_zedboard_top.v 에서 96단(384탭)으로 넘긴다. 이유는
     //   tdc_fmcw_core_co.v 상단의 ★ 2026-09-03 주석 참조.
+    //   기본값 80단(320탭)은 옛 Zybo 빌드용이었다. Zybo 는 2026-09-04 부로 사용
+    //   중단했으므로 지금 실제로 쓰이는 값은 96단뿐이다.
     //   ※ 16의 배수여야 popcount 트리가 4x(N/16)x16 으로 떨어진다 (80, 96, 112 ...).
     //   ※ 448 초과 금지 — sum_fine/ts_fine_idx 가 [8:0](<=511) 이고 히스토그램이 512칸이다.
     parameter integer CARRY4_STAGES  = 80
@@ -72,15 +73,38 @@ module tdc_test_top #(
         .locked   (clk_locked)
     );
     
+    // ==========================================================
+    // ★ [2026-09-04] phase_shifter 가 "목표 위상으로 이동" 방식으로 바뀌었다.
+    //   (기존: start_shift 한 번에 280스텝 자동 스윕 -> 변경: phase_tgt 로 이동)
+    //   이유와 상세는 RTL/phase_shifter.v 상단 주석 참조.
+    //
+    //   [아래 phase_tgt_reg 는 AXI 도입 전까지의 임시 구동부다]
+    //   버튼(btn_shift)을 누를 때마다 목표 위상을 한 칸 올린다. 그러면
+    //     목표 변경 -> ps_busy 상승 -> 이동 완료 -> ps_busy 하강
+    //   이 되어, 기존의 sweep_finished(ps_busy 하강 에지) -> 히스토그램 리드아웃
+    //   경로가 그대로 살아 있다. 예전엔 리드아웃 한 번 보려고 280스텝 2.8초를
+    //   기다려야 했는데, 이제는 버튼 누르면 곧바로 뜬다.
+    //
+    //   ★ AXI 레지스터가 들어오면 이 블록을 통째로 지우고 phase_tgt 를
+    //     CTRL/PHASE_TGT 레지스터에 직접 연결할 것.
+    // ==========================================================
+    reg [8:0] phase_tgt_reg  = 9'd0;
+    reg       btn_shift_d1   = 1'b0;
+    always @(posedge clk_200_fixed) begin
+        btn_shift_d1 <= btn_shift;
+        if (btn_shift && !btn_shift_d1)
+            phase_tgt_reg <= (phase_tgt_reg == 9'd279) ? 9'd0 : (phase_tgt_reg + 1'b1);
+    end
+
     mmcm_phase_shifter u_ps_ctrl (
         .clk                 (clk_200_fixed), 
         .rst_n               (clk_locked), 
-        .start_shift         (btn_shift), 
+        .phase_tgt           (phase_tgt_reg),   // ★ 2026-09-04 : start_shift 대체
         .psen                (psen), 
         .psincdec            (psincdec), 
         .psdone              (psdone), 
         .busy                (ps_busy), 
-        .loop_cnt            (current_loop_cnt),
+        .phase_cur           (current_loop_cnt),// ★ 2026-09-04 : 포트명 loop_cnt -> phase_cur
         .loop_updated_toggle (loop_updated_toggle) // ★ 2026-08-19 추가
     );
 
