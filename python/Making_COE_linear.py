@@ -14,7 +14,13 @@ import pandas as pd
 #   두 COE는 '같은 유효 구간'을 써야 공정하므로, code-density와 동일하게
 #   최신 히스토그램에서 유효 구간을 검출한다.
 T_PERIOD_PS    = 5000.0
-NUM_TOTAL_TAPS = 320
+# ★ [2026-09-03] 320 -> 384 : ZedBoard 캐리체인을 96단(384탭)으로 늘렸다.
+#   왜 : 2026-09-03 Mode 2 측정에서 ZedBoard 는 320탭이 5 ns 안에 전부 채워졌다.
+#        끝단에 빈 칸이 안 생기면 유효탭 상한을 히스토그램에서 읽을 방법이 없다.
+#        384탭이면 세 보드 모두 뒤쪽에 빈 칸이 생겨 상한이 그대로 드러난다.
+#        근거 : Markdown/2026-09-03_zedboard_tap_range_plan.md §7
+#   ※ 320탭으로 뜬 옛 Zybo 데이터를 분석할 때는 이 값을 320 으로 되돌릴 것.
+NUM_TOTAL_TAPS = 384
 ROM_MAX_VALUE  = 8191
 EDGE_TRIM_FRAC = 0.05
 SOURCE_TAG     = "linear"        # tdc_calib_linear_rom.coe 로 보관

@@ -10,6 +10,14 @@ import datetime  # 날짜 및 시간 생성을 위한 라이브러리 추가
 # ★ 2026-08-22 수정 — 측정 데이터가 python/ 에서 data/<세션폴더>/ 로 옮겨졌다.
 #   DATA_SUBDIR + INPUT_CSV 두 상수만 고치면 되도록 분리했다.
 #   DATA_SUBDIR 를 "" 로 두면 예전처럼 python/ 폴더를 본다.
+# ★ [2026-09-03] 320 -> 384 : ZedBoard 캐리체인을 96단(384탭)으로 늘렸다.
+#   왜 : 2026-09-03 Mode 2 측정에서 ZedBoard 는 320탭이 5 ns 안에 전부 채워졌다.
+#        끝단에 빈 칸이 안 생기면 유효탭 상한을 히스토그램에서 읽을 방법이 없다.
+#        384탭이면 세 보드 모두 뒤쪽에 빈 칸이 생겨 상한이 그대로 드러난다.
+#        근거 : Markdown/2026-09-03_zedboard_tap_range_plan.md §7
+#   ※ 320탭으로 뜬 옛 Zybo 데이터를 분석할 때는 이 값을 320 으로 되돌릴 것.
+NUM_TOTAL_TAPS = 384
+
 DATA_SUBDIR = os.path.join("..", "data", "Test_20260822")
 INPUT_CSV   = "ro_val2.csv"        # ← 캡처마다 이것만 바꿔 3회 실행
 
@@ -70,16 +78,16 @@ def main():
     df['Count']   = df[data_col].apply(parse_value)
 
     # ---------------------------------------------------------
-    # 3. 데이터 필터링 (0 ~ 319번 탭 데이터만 추출)
+    # 3. 데이터 필터링 (0 ~ NUM_TOTAL_TAPS-1 번 탭 데이터만 추출)
     # ---------------------------------------------------------
     # ILA 캡처 중 중복된 주소(트리거 대기 시간 등)가 있을 수 있으므로 max()로 안전하게 병합
-    tap_data = df[(df['Address'] >= 0) & (df['Address'] < 320)].groupby('Address')['Count'].max()
+    tap_data = df[(df['Address'] >= 0) & (df['Address'] < NUM_TOTAL_TAPS)].groupby('Address')['Count'].max()
     
     taps = tap_data.index.to_numpy()
     counts = tap_data.values
 
     if len(taps) == 0:
-        print("[!] Error: No valid tap data (0-319) found in the CSV.")
+        print(f"[!] Error: No valid tap data (0-{NUM_TOTAL_TAPS-1}) found in the CSV.")
         return
 
     # ---------------------------------------------------------

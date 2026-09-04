@@ -27,10 +27,11 @@
 //        FMC 뱅크 34/35 의 VCCO 가 2.5V 여야 LVDS_25 수신과 내부 100옴 종단
 //        (DIFF_TERM)이 동작한다. 1.8V 로 두면 LVDS 입력이 규격을 벗어난다.
 //    (c) RTL/tdc_zedboard.xdc 를 쓸 것. Zybo 용 tdc.xdc 는 넣지 말 것(핀 충돌).
-//        캐리체인 LOC 좌표(SLICE_X42/X43, Y0~Y79)는 2026-09-02 에
-//        link_design -part xc7z020clg484-1 로 조회해 XC7Z020 에도 동일하게
-//        존재함을 확인했다 — X42=SLICEM, X43=SLICEL, 둘 다 Y0~Y79 연속.
-//        따라서 720개 LOC 제약을 그대로 재사용한다.
+//        ★ 2026-09-03 : 체인이 96단(384탭)으로 늘어 LOC 제약이 2400줄이 됐다.
+//        손으로 쓰는 것이 아니라 python/gen_chain_xdc.py --stages 96 으로 생성한다.
+//        캐리체인 LOC 좌표는 2026-09-03 에 link_design -part xc7z020clg484-1 로
+//        조회해 확인했다 — X42=SLICEM, X43=SLICEL, 둘 다 Y0~Y149 연속이므로
+//        96단(Y0~Y95)은 여유 있게 들어간다.
 // =============================================================================
 
 module tdc_zedboard_top #(
@@ -86,8 +87,17 @@ module tdc_zedboard_top #(
     //  ext_hit_in 을 그대로 tdc_hit_in 으로 넘기므로, LVDS 신호가 CYINIT 까지
     //  아무 로직 없이 도달한다.
     // -------------------------------------------------------------------------
+    // ★ [2026-09-03] CARRY4_STAGES = 96 (384탭) 로 넘긴다.
+    //   ZedBoard 는 320탭이 5 ns 안에 전부 들어가 버려서(2026-09-03 Mode 2 측정에서
+    //   히스토그램 320칸이 모두 채워짐) 유효탭 상한을 히스토그램에서 읽을 수가 없었다.
+    //   384탭이면 세 보드 모두 뒤쪽에 빈 칸이 생겨 상한이 눈에 보인다.
+    //   (448 도 빌드해 봤으나 타이밍 여유가 5 ps 뿐이었다 —
+    //    자세한 근거는 tdc_fmcw_core_co.v 상단 [왜 384 인가] 참조)
+    //   자세한 근거는 Markdown/2026-09-03_zedboard_tap_range_plan.md §7, §9 참조.
+    //   ※ XDC 도 같이 96단이어야 한다 : python/gen_chain_xdc.py --stages 96
     tdc_test_top #(
-        .OPERATION_MODE (OPERATION_MODE)
+        .OPERATION_MODE (OPERATION_MODE),
+        .CARRY4_STAGES  (96)
     ) u_core (
         .clk_125    (clk_100),        // ★ 실제로는 100 MHz. clk_wiz_0 를 100 MHz 입력으로 재생성할 것
         .rst_n      (rst_n),

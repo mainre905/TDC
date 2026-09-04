@@ -12,7 +12,13 @@ import matplotlib.pyplot as plt
 #   연산 : timestamp = coarse*5000 - calibrated_fine_ps[fine_idx]
 #   → LUT[i] = "tap i일 때 클럭 엣지보다 얼마나 앞서 도착했는가(ps)", 단조 증가, 0~5000
 T_PERIOD_PS    = 5000.0    # tdc_clk 한 주기 (200MHz)
-NUM_TOTAL_TAPS = 320       # ROM 깊이 = CARRY4 80단 x 4
+# ★ [2026-09-03] 320 -> 384 : ZedBoard 캐리체인을 96단(384탭)으로 늘렸다.
+#   왜 : 2026-09-03 Mode 2 측정에서 ZedBoard 는 320탭이 5 ns 안에 전부 채워졌다.
+#        끝단에 빈 칸이 안 생기면 유효탭 상한을 히스토그램에서 읽을 방법이 없다.
+#        384탭이면 세 보드 모두 뒤쪽에 빈 칸이 생겨 상한이 그대로 드러난다.
+#        근거 : Markdown/2026-09-03_zedboard_tap_range_plan.md §7
+#   ※ 320탭으로 뜬 옛 Zybo 데이터를 분석할 때는 이 값을 320 으로 되돌릴 것.
+NUM_TOTAL_TAPS = 384       # ROM 깊이 = CARRY4 96단 x 4
 ROM_MAX_VALUE  = 8191      # 13비트 상한
 EDGE_TRIM_FRAC = 0.05      # 유효 구간 끝단 컷 (평균의 5% 미만인 양 끝 bin 제거)
 

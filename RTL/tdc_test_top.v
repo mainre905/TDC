@@ -6,7 +6,15 @@ module tdc_test_top #(
     // 1 : Hit = Ring Osc(랜덤)   | Clock = Fixed 200MHz  (기본 동작 및 탭 누적 테스트용)
     // 2 : Hit = 외부 STM32 신호  | Clock = Fixed 200MHz  (실제 측정용)
     // ==========================================================
-    parameter integer OPERATION_MODE = 1
+    parameter integer OPERATION_MODE = 1,
+
+    // ★ [2026-09-03 추가] 캐리체인 단수 (탭 수 = CARRY4_STAGES x 4)
+    //   기본 80단 = 320탭 — Zybo 두 대는 이 값을 그대로 쓰므로 기존 빌드와 동일하다.
+    //   ZedBoard 는 tdc_zedboard_top.v 에서 112단(448탭)으로 넘긴다. 이유는
+    //   tdc_fmcw_core_co.v 상단의 ★ 2026-09-03 주석 참조.
+    //   ※ 16의 배수여야 popcount 트리가 4x(N/16)x16 으로 떨어진다 (80, 96, 112 ...).
+    //   ※ 448 초과 금지 — sum_fine/ts_fine_idx 가 [8:0](<=511) 이고 히스토그램이 512칸이다.
+    parameter integer CARRY4_STAGES  = 80
 )(
     input  wire       clk_125, 
     input  wire       rst_n, 
@@ -14,6 +22,10 @@ module tdc_test_top #(
     input  wire       ext_hit_in,  
     output wire [3:0] led
 );
+
+    // ★ [2026-09-03 추가] 탭 수 — 히스토그램 리드아웃 스캔 범위에 쓴다.
+    //   히스토그램 BRAM 은 512칸(tdc_bram_512x32)이므로 448탭까지 그대로 담긴다.
+    localparam integer NUM_TAPS = CARRY4_STAGES * 4;
 
     // ==========================================
     // 1. Clock Generation & MMCM Phase Shifter
@@ -250,7 +262,10 @@ module tdc_test_top #(
     //   Markdown/2026-08-04_report.md §2-7 / §3-5 참조.
     // ★ 2026-08-22 : tdc_fmcw_core(O 탭) -> tdc_fmcw_core_co(CO 탭) 로 전환.
     //   집 보드 CO 단일 지연선 캠페인(Markdown/2026-08-22_home_board_campaign.md) 대상이다.
-    tdc_fmcw_core_co u_tdc (
+    // ★ 2026-09-03 : 단수를 상위에서 넘긴다 (Zybo 80단 / ZedBoard 112단)
+    tdc_fmcw_core_co #(
+        .CARRY4_STAGES (CARRY4_STAGES)
+    ) u_tdc (
         .clk         (tdc_clk),
         .rst_n       (clk_locked),
         .hit         (tdc_hit_in),
@@ -324,7 +339,11 @@ module tdc_test_top #(
                 readout_active <= 1'b1;
                 sweep_addr     <= 9'd0;
             end else if (readout_active) begin
-                if (sweep_addr == 9'd319) begin
+                // ★ [2026-09-03] 320탭 고정 -> NUM_TAPS 유도.
+                //   80단이면 319, 112단이면 447 에서 스캔이 끝난다.
+                //   이 값을 안 고치면 448탭 빌드에서 뒤쪽 128칸이 영영 안 읽혀,
+                //   유효탭 상한을 히스토그램에서 읽어낸다는 이번 확장의 목적 자체가 무산된다.
+                if (sweep_addr == (NUM_TAPS - 1)) begin
                     readout_active <= 1'b0;
                 end else begin
                     sweep_addr <= sweep_addr + 1'b1;
@@ -506,7 +525,7 @@ module tdc_test_top #(
         
         // --- [COE 추출을 위한 히스토그램 프로브 그룹 CODE DENSITY TEST] ---
         .probe1 (readout_active),            // [0:0]  히스토그램 캡처 조건 (1일 때 캡처)
-        .probe4 (probe_read_addr_d1),        // [8:0]  히스토그램 X축: Tap 인덱스 (0~319)
+        .probe4 (probe_read_addr_d1),        // [8:0]  히스토그램 X축: Tap 인덱스 (0~NUM_TAPS-1, 112단이면 0~447)
         .probe5 (histo_read_data),           // [31:0] 히스토그램 Y축: 누적 카운트 값
 
         // --- [RO 주파수/온도 특성화 그룹] 2026-07-24 추가 ---

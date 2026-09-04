@@ -100,11 +100,69 @@ reg snapshot_valid_stg2, snapshot_valid_stg3, snapshot_valid_stg4;
 (* srl_style = "register" *) reg [31:0] captured_c0_stg4, captured_c180_stg4_plus1;
 
 reg [8:0]  fine_idx_stg4;
-reg        danger_zone_stg4;
+// ★ [2026-09-03] danger_zone_stg4 레지스터 삭제 — 비교를 Stage 5 로 옮겼다.
+//
+//  [무엇이 문제였나] 384탭 첫 빌드에서 최악 경로가
+//      stg3_group_reg[2][2] -> danger_zone_stg4_reg/D   (WNS +0.010 ns, 여유 10 ps)
+//    였다. Stage 4 가 한 사이클에 "4항 덧셈 + 비교 2개" 를 전부 하고 있었기 때문이다.
+//      sum_fine = stg3_group[0]+[1]+[2]+[3];              <- 덧셈
+//      danger_zone_stg4 <= (sum_fine < 40 || sum_fine > 220);  <- 비교까지 연달아
+//
+//  [무엇을 바꿨나] danger_zone 은 Stage 5 에서만 쓰인다. 그런데 Stage 4 에서 덧셈
+//    결과가 나오자마자 비교까지 해서 레지스터에 넣고 있었다. 비교를 Stage 5 로
+//    옮기고, 레지스터된 fine_idx_stg4 를 직접 비교한다.
+//
+//  [왜 안전한가 — 동작이 한 치도 안 바뀐다]
+//    기존 : danger_zone_stg4 = f(sum_fine),  sum_fine 은 fine_idx_stg4 에 그대로 들어감
+//    변경 : Stage 5 에서 f(fine_idx_stg4) 를 계산
+//    fine_idx_stg4 == sum_fine 이므로 같은 값을, 같은 사이클에, 같은 곳에서 쓴다.
+//    레이턴시도 그대로다 (파이프라인 단수 불변). 임계경로만 둘로 쪼개진다:
+//      Stage 4 : FF -> 덧셈 -> FF
+//      Stage 5 : FF -> 비교 + 먹스 -> FF
+//
+//  임계값은 localparam 으로 이름을 붙여 밖에서 보이게 했다. 값 자체는 안 바꿨다.
+//  (이 값들은 옛 O 탭 분포로 튜닝된 것이고 아직 재튜닝된 적이 없다 — 아래 주석 참조.
+//   AXI 단계에서 레지스터로 뺄 항목이다.)
+localparam [8:0] DANGER_LO = 9'd40;    // 이번 에지 바로 앞 -> coarse_0 가 전이 중
+localparam [8:0] DANGER_HI = 9'd220;   // 지난 에지 바로 뒤 -> 역시 에지 근처
 
-reg [3:0] stg1_halfA [0:19];
-reg [3:0] stg1_halfB [0:19];
-reg [7:0] stg3_group0, stg3_group1, stg3_group2, stg3_group3;
+// ★ [2026-09-03] 384탭(96단) 확장 — popcount 트리를 단수에서 유도하도록 파라미터화
+//
+//  [무엇이 문제였나] 트리가 320탭에 맞춰 하드코딩돼 있었다. stg1_half*[0:19] 는
+//    "16비트 묶음 20개", stg3_group0~3 은 "묶음 5개씩 4덩어리" 로 320 = 4x5x16 전용이었다.
+//
+//  [왜 바꾸나] ZedBoard(XC7Z020, DNA 0x3D996854) 는 320탭이 5 ns 안에 전부 들어간다.
+//    즉 지연선이 클럭 한 주기보다 짧아, 끝단에 히트가 안 쌓이는 "빈 칸"이 생기지 않는다.
+//    빈 칸이 없으면 유효탭 상한을 히스토그램에서 읽어낼 수가 없고, 최악의 경우 320탭을
+//    다 지나고도 시간이 남아 sum_fine=320(ROM 주소 범위 밖)이 되는 사각지대가 생긴다.
+//    체인을 384탭으로 늘리면 세 보드 전부 뒤쪽에 빈 칸이 생기므로,
+//    유효탭 상한이 빌드 한 번으로 히스토그램에 그대로 드러난다.
+//
+//  [왜 384 인가]
+//    (1) 쓸 수 있는 단수는 16의 배수뿐이다 (아래 GPQ 가 정수여야 한다).
+//        즉 320(현행) / 384 / 448 셋 중 하나다. 400탭(100단)은 GPQ=6.25 라 불가능.
+//    (2) 448 이 구조적 상한이다 : sum_fine / ts_fine_idx 가 [8:0](<=511),
+//        히스토그램이 512칸, stg3_group 이 [7:0] 이라 448 까지는 선언 폭을 하나도
+//        안 바꿔도 된다. 512 로 가면 sum_fine 이 10비트가 되어 fine 인덱스 /
+//        히스토그램 주소 / ROM 주소가 전부 따라 넓어진다.
+//    (3) 그런데 448 은 타이밍 여유가 없다 — 2026-09-03 ZedBoard 실측:
+//          기본 전략           WNS -0.070 ns (위반 4개)
+//          고강도 전략 + phys_opt  WNS +0.005 ns (겨우 통과)
+//        위반 경로는 전부 stg1_half* -> stg3_group 트리 가산기였고, 지연의
+//        64~67 %가 배선이었다 (로직은 1.6~1.8 ns 뿐). 5 ps 여유는 여유가 아니다.
+//    (4) 384 는 트리가 24묶음(448 은 28묶음)이라 배선이 가볍고, 필요한 빈 칸은
+//        충분히 확보된다 : 384 x 15.6 ps = 5990 ps 로 ZedBoard 에서도 5 ns 를 넘긴다.
+//
+//  NGRP = 16비트 묶음 개수      = CARRY4_STAGES/4   (80단 -> 20, 96단 -> 24)
+//  GPQ  = stg3 한 덩어리가 맡는 묶음 수 = NGRP/4     (80단 ->  5, 96단 ->  6)
+//  ※ CARRY4_STAGES 는 16의 배수여야 GPQ 가 정수가 된다. 80, 96, 112 모두 만족.
+//  ※ 기본값은 80 그대로다. Zybo 빌드는 이 파일을 고쳐도 산술이 글자 그대로 동일하다.
+localparam integer NGRP = CARRY4_STAGES / 4;
+localparam integer GPQ  = NGRP / 4;
+
+reg [3:0] stg1_halfA [0:NGRP-1];
+reg [3:0] stg1_halfB [0:NGRP-1];
+reg [7:0] stg3_group [0:3];        // 최대 GPQ x 2 x 8 = 112 (112단) -> [7:0] 로 충분
 
 integer i;
 
@@ -168,10 +226,11 @@ always @(posedge clk or negedge rst_n) begin
         captured_c0_stg2 <= 0; captured_c180_stg2 <= 0;
         captured_c0_stg3 <= 0; captured_c180_stg3_plus1 <= 0;
         captured_c0_stg4 <= 0; captured_c180_stg4_plus1 <= 0;
-        fine_idx_stg4 <= 0; danger_zone_stg4 <= 0;
+        fine_idx_stg4 <= 0;   // ★ 2026-09-03 : danger_zone_stg4 삭제 (Stage 5 로 이동)
         ts_coarse <= 0; ts_valid <= 0; ts_fine_idx <= 0;
-        stg3_group0 <= 0; stg3_group1 <= 0; stg3_group2 <= 0; stg3_group3 <= 0;
-        for (i = 0; i < 20; i = i + 1) begin
+        // ★ [2026-09-03] 448탭 확장 — 고정 20 대신 NGRP 로
+        for (i = 0; i < 4;    i = i + 1) stg3_group[i] <= 0;
+        for (i = 0; i < NGRP; i = i + 1) begin
             stg1_halfA[i] <= 0; stg1_halfB[i] <= 0;
         end
     end
@@ -196,7 +255,8 @@ always @(posedge clk or negedge rst_n) begin
             captured_c0_stg2   <= coarse_0;
             captured_c180_stg2 <= coarse_180_sync;
 
-            for (i = 0; i < 20; i = i + 1) begin
+            // ★ [2026-09-03] 448탭 확장 — 고정 20 대신 NGRP 로
+            for (i = 0; i < NGRP; i = i + 1) begin
                 stg1_halfA[i] <= popcount8(taps_eff[i*16 +: 8]);
                 stg1_halfB[i] <= popcount8(taps_eff[i*16+8 +: 8]);
             end
@@ -207,10 +267,19 @@ always @(posedge clk or negedge rst_n) begin
 
         // [Stage 3]
         if (snapshot_valid_stg2) begin
-            stg3_group0 <= stg1_halfA[0]+stg1_halfB[0] + stg1_halfA[1]+stg1_halfB[1] + stg1_halfA[2]+stg1_halfB[2] + stg1_halfA[3]+stg1_halfB[3] + stg1_halfA[4]+stg1_halfB[4];
-            stg3_group1 <= stg1_halfA[5]+stg1_halfB[5] + stg1_halfA[6]+stg1_halfB[6] + stg1_halfA[7]+stg1_halfB[7] + stg1_halfA[8]+stg1_halfB[8] + stg1_halfA[9]+stg1_halfB[9];
-            stg3_group2 <= stg1_halfA[10]+stg1_halfB[10] + stg1_halfA[11]+stg1_halfB[11] + stg1_halfA[12]+stg1_halfB[12] + stg1_halfA[13]+stg1_halfB[13] + stg1_halfA[14]+stg1_halfB[14];
-            stg3_group3 <= stg1_halfA[15]+stg1_halfB[15] + stg1_halfA[16]+stg1_halfB[16] + stg1_halfA[17]+stg1_halfB[17] + stg1_halfA[18]+stg1_halfB[18] + stg1_halfA[19]+stg1_halfB[19];
+            // ★ [2026-09-03] 448탭 확장 — 4덩어리 x GPQ묶음을 루프로 펼친다.
+            //   80단(GPQ=5)이면 예전 4줄짜리 식과 글자 그대로 같은 덧셈이 나온다.
+            //   합성 결과도 같은 덧셈 트리다 (누적 순서만 명시적으로 쓴 것).
+            begin : CALC_STG3
+                reg [7:0] acc;
+                integer   q, g;
+                for (q = 0; q < 4; q = q + 1) begin
+                    acc = 8'd0;
+                    for (g = 0; g < GPQ; g = g + 1)
+                        acc = acc + stg1_halfA[q*GPQ + g] + stg1_halfB[q*GPQ + g];
+                    stg3_group[q] <= acc;
+                end
+            end
 
             captured_c0_stg3 <= captured_c0_stg2;
             captured_c180_stg3_plus1 <= captured_c180_stg2 + 1'b1;
@@ -224,14 +293,12 @@ always @(posedge clk or negedge rst_n) begin
         if (snapshot_valid_stg3) begin
             begin : CALC_FINE
                 reg [8:0] sum_fine;
-                sum_fine = stg3_group0 + stg3_group1 + stg3_group2 + stg3_group3;
+                // ★ [2026-09-03] 448탭 확장 — 배열로 바뀐 stg3_group 참조
+                sum_fine = stg3_group[0] + stg3_group[1] + stg3_group[2] + stg3_group[3];
                 fine_idx_stg4 <= sum_fine;
 
-                // ★ 데이터 기반 Threshold 적용 구역 (40, 220)
-                //   [2026-08-04 주의] 이 값은 O 탭 분포로 튜닝된 것이다. CO 탭은
-                //   탭당 폭 분포가 달라지므로 첫 측정 후 재튜닝이 필요할 수 있다.
-                //   지금은 원본과 동일 조건으로 비교하기 위해 그대로 둔다.
-                danger_zone_stg4 <= (sum_fine < 9'd40 || sum_fine > 9'd220);
+                // ★ [2026-09-03] 여기 있던 danger_zone 비교를 Stage 5 로 옮겼다.
+                //   Stage 4 는 이제 덧셈만 한다. 이유는 파일 상단 DANGER_LO/HI 주석 참조.
             end
 
             captured_c0_stg4 <= captured_c0_stg3;
@@ -245,7 +312,20 @@ always @(posedge clk or negedge rst_n) begin
         if (snapshot_valid_stg4) begin
             ts_fine_idx <= fine_idx_stg4;
 
-            if (danger_zone_stg4) begin
+            // ★ [2026-09-04] danger 판정을 여기서 한다 (Stage 4 에서 옮겨옴).
+            //   fine_idx_stg4 는 레지스터 출력이므로 이 경로는 FF -> 비교 -> 먹스 -> FF 다.
+            //   기존에 danger_zone_stg4 가 담고 있던 값과 완전히 동일하다
+            //   (danger_zone_stg4 = f(sum_fine) 이고 fine_idx_stg4 == sum_fine).
+            //
+            //   [40, 220] 밖 = 클럭 에지 근처 = coarse_0 가 전이 중일 수 있다.
+            //   그때는 반 주기 어긋난 180도 섀도우 카운터를 쓴다.
+            //   이건 타이밍 수정이 아니라 메타스테이빌리티 회피다.
+            //
+            //   [2026-08-04 주의] 이 값은 O 탭 분포로 튜닝된 것이다. CO 탭은 탭당 폭
+            //   분포가 달라 재튜닝이 필요할 수 있는데 아직 안 했다. 또 탭 번호 단위라
+            //   보드마다 LSB 가 다르면 뜻이 달라진다 (40탭 = 집 Zybo 671 ps /
+            //   ZedBoard 624 ps). AXI 단계에서 레지스터로 뺄 것.
+            if (fine_idx_stg4 < DANGER_LO || fine_idx_stg4 > DANGER_HI) begin
                 ts_coarse <= captured_c180_stg4_plus1;
             end else begin
                 ts_coarse <= captured_c0_stg4;

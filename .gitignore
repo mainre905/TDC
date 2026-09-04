@@ -8,3 +8,9 @@ loopcnt_tap_time.csv
 __pycache__/
 *.pyc
 *.bak
+
+# Vivado 프로젝트/빌드 산출물 (build_zedboard.tcl 로 언제든 재생성 가능)
+vivado/
+*.jou
+*.str
+.Xil/

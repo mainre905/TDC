@@ -13,7 +13,13 @@ import matplotlib.pyplot as plt
 #   AFTER  : Method B — cal LUT의 누적 시간축 위에서 val 히트를 균일 격자로
 #            fractional re-binning (bin merging/interpolation). DNL·INL 개선.
 T_PERIOD_PS    = 5000.0    # tdc_clk 한 주기 (200MHz)
-NUM_TOTAL_TAPS = 320
+# ★ [2026-09-03] 320 -> 384 : ZedBoard 캐리체인을 96단(384탭)으로 늘렸다.
+#   왜 : 2026-09-03 Mode 2 측정에서 ZedBoard 는 320탭이 5 ns 안에 전부 채워졌다.
+#        끝단에 빈 칸이 안 생기면 유효탭 상한을 히스토그램에서 읽을 방법이 없다.
+#        384탭이면 세 보드 모두 뒤쪽에 빈 칸이 생겨 상한이 그대로 드러난다.
+#        근거 : Markdown/2026-09-03_zedboard_tap_range_plan.md §7
+#   ※ 320탭으로 뜬 옛 Zybo 데이터를 분석할 때는 이 값을 320 으로 되돌릴 것.
+NUM_TOTAL_TAPS = 384
 EDGE_TRIM_FRAC = 0.05      # 유효 구간 양 끝단 컷 (평균의 5% 미만)
 
 # cal/val 분리 (같은 빌드의 독립 측정 → 순환논리 회피)
