@@ -58,6 +58,13 @@ module tdc_seq (
     // ---- 히스토그램과 주고받는 신호 ----
     input  wire        hit_accepted,     // BRAM 에 실제로 반영된 히트 (1클럭)
     input  wire        hit_dropped,      // 데드타임에 버려진 히트 (1클럭)
+
+    // ---- ★ 2026-09-05 : 캡처 버퍼 (Mode 2) ----
+    input  wire        cap_full,         // CAP_N 발 다 찼다
+    input  wire        cap_written,      // 실제로 쓴 히트 (1클럭)
+    input  wire        cap_lost,         // full 이라 버린 히트 (1클럭)
+    output reg         cap_en,           // 캡처 허용
+    output reg         cap_clr,          // 포인터 0 으로 (레벨)
     output reg         ro_en,            // 링오실레이터 가동
     output reg         histo_en,         // 누적 허용
     output reg         histo_clr,        // 지우기 (레벨)
@@ -82,7 +89,16 @@ module tdc_seq (
                      S_HISTOGRAM = 3'd4,
                      S_DONE      = 3'd5;
 
-    localparam [1:0] SRC_RO = 2'b01;
+    localparam [1:0] SRC_RO  = 2'b01;
+    localparam [1:0] SRC_EXT = 2'b11;
+
+    // ★ 2026-09-05 : Mode 2 (외부 LVDS) 는 상태를 재활용한다.
+    //   RO 를 켤 필요도, 주파수를 잴 필요도 없다. 신호는 밖에서 계속 들어온다.
+    //     S_IDLE -> S_STABILIZE(버퍼 비우기) -> S_HISTOGRAM(=캡처 구간) -> S_DONE
+    //   상태 이름이 히스토그램인데 캡처에도 쓰는 것이 어색하지만, 상태를 늘리면
+    //   PS 쪽 해석 코드가 모드마다 갈라진다. "누적 구간" 이라는 뜻으로 읽을 것.
+    //   ※ 이름을 S_ACQ 로 바꾸는 것이 옳지만, 2026-09-05 3단계 검증 로그와
+    //     사용자가 준 상태표가 S_HISTOGRAM 으로 돼 있어 그대로 둔다.
 
     // 히스토그램 BRAM 은 512칸이고 CLEAR 는 한 칸씩 돈다. 넉넉히 잡는다.
     localparam integer CLEAR_CYCLES = 1024;
@@ -115,6 +131,8 @@ module tdc_seq (
             ro_en         <= 1'b0;
             histo_en      <= 1'b0;
             histo_clr     <= 1'b0;
+            cap_en        <= 1'b0;
+            cap_clr       <= 1'b0;
             busy          <= 1'b0;
             done          <= 1'b0;
             hit_cnt       <= 32'd0;
@@ -138,6 +156,7 @@ module tdc_seq (
                 ro_en     <= 1'b0;
                 histo_en  <= 1'b0;
                 histo_clr <= 1'b0;
+                cap_en    <= 1'b0;
                 busy      <= 1'b0;
                 // done 은 여기서 내리지 않는다. S_DONE 에서 내린 뒤 들어온다.
                 if (ctrl_start && (ctrl_hit_src == SRC_RO)) begin
@@ -152,6 +171,21 @@ module tdc_seq (
                     remain_last <= (target_hits == 32'd1);
                     unlimited   <= (target_hits == 32'd0);
                     state       <= S_RO_ENABLE;
+                end
+                // ★ 2026-09-05 : Mode 2 — 외부 LVDS. RO 도 주파수 측정도 없다.
+                //   신호가 밖에서 이미 들어오고 있으므로 버퍼만 비우고 바로 받는다.
+                //   종료는 캡처 버퍼가 CAP_N 발로 차는 것으로 판정하므로
+                //   remain/unlimited 는 쓰지 않는다.
+                else if (ctrl_start && (ctrl_hit_src == SRC_EXT)) begin
+                    busy      <= 1'b1;
+                    done      <= 1'b0;
+                    hit_cnt   <= 32'd0;
+                    drop_cnt  <= 32'd0;
+                    timer     <= 32'd0;
+                    ro_en     <= 1'b0;
+                    unlimited <= 1'b1;        // 히트 수로는 안 끝난다
+                    cap_clr   <= 1'b1;        // 버퍼 포인터 0 으로
+                    state     <= S_STABILIZE;
                 end
             end
 
@@ -191,10 +225,19 @@ module tdc_seq (
             // 지우기 + 안정화. 지우기는 1024클럭(5.1 us)이면 512칸을 다 돈다.
             // settle_n(기본 100 us)이 그보다 크므로 둘을 겹쳐 기다린다.
             S_STABILIZE: begin
-                if (timer >= CLEAR_CYCLES) histo_clr <= 1'b0;
-                if (timer >= settle_n) begin
+                if (timer >= CLEAR_CYCLES) begin
                     histo_clr <= 1'b0;
-                    histo_en  <= 1'b1;
+                    cap_clr   <= 1'b0;
+                end
+                // ★ 2026-09-05 : Mode 2 는 안정화를 기다리지 않는다. 기다릴 대상이
+                //   없기 때문이다 — RO 를 켠 것도 아니고 신호는 이미 밖에서 온다.
+                //   버퍼 비우기(1024클럭)만 끝나면 바로 받는다.
+                if ((ctrl_hit_src == SRC_EXT) ? (timer >= CLEAR_CYCLES)
+                                              : (timer >= settle_n)) begin
+                    histo_clr <= 1'b0;
+                    cap_clr   <= 1'b0;
+                    histo_en  <= (ctrl_hit_src == SRC_RO);
+                    cap_en    <= (ctrl_hit_src == SRC_EXT);
                     timer     <= 32'd0;
                     state     <= S_HISTOGRAM;
                 end else begin
@@ -204,8 +247,11 @@ module tdc_seq (
 
             // -----------------------------------------------------------------
             S_HISTOGRAM: begin
-                if (hit_accepted) hit_cnt  <= hit_cnt  + 1'b1;
-                if (hit_dropped)  drop_cnt <= drop_cnt + 1'b1;
+                // ★ 2026-09-05 : 모드에 따라 세는 대상이 다르다.
+                //   Mode 1 은 히스토그램이 받아들인 것, Mode 2 는 버퍼에 쓴 것.
+                //   어느 쪽이든 "실제로 저장된 히트" 를 센다는 뜻은 같다.
+                if (hit_accepted || cap_written) hit_cnt  <= hit_cnt  + 1'b1;
+                if (hit_dropped  || cap_lost)    drop_cnt <= drop_cnt + 1'b1;
 
                 // 감소 카운터. remain_last 는 '지금 값이 1' 이라는 뜻이므로,
                 // 이번 hit_accepted 가 곧 마지막 히트다.
@@ -214,9 +260,13 @@ module tdc_seq (
                     remain_last <= (remain == 32'd2);
                 end
 
-                // 종료 조건은 등록된 1비트 둘만 본다 — CE 경로가 짧다.
-                if (ctrl_stop || (!unlimited && remain_last && hit_accepted)) begin
+                // ★ 2026-09-05 : Mode 2 는 캡처 버퍼가 차면 끝난다.
+                //   cap_full 은 tdc_capture 가 등록해서 주는 1비트라 경로가 짧다.
+                // 종료 조건은 등록된 1비트들만 본다 — CE 경로가 짧다.
+                if (ctrl_stop || (!unlimited && remain_last && hit_accepted)
+                              || ((ctrl_hit_src == SRC_EXT) && cap_full)) begin
                     histo_en    <= 1'b0;
+                    cap_en      <= 1'b0;
                     ro_at_end   <= ro_cnt;
                     temp_at_end <= die_temp;
                     snap_tgl    <= ~snap_tgl;
@@ -232,6 +282,7 @@ module tdc_seq (
             S_DONE: begin
                 ro_en    <= 1'b0;
                 histo_en <= 1'b0;
+                cap_en   <= 1'b0;
                 if (!ctrl_start) state <= S_IDLE;
             end
 

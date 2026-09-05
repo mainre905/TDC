@@ -46,8 +46,11 @@ module tdc_test_top #(
     input  wire        i_ctrl_start,
     input  wire        i_ctrl_stop,
     input  wire [1:0]  i_ctrl_hit_src,
+    input  wire        i_ctrl_cap_fmt,   // 0=timestamp_ps  1=raw{coarse,fine}
     input  wire [31:0] i_target_hits,
     input  wire [31:0] i_settle_n,
+    input  wire [8:0]  i_danger_lo,   // ★ 2026-09-05 : 상수 -> 레지스터
+    input  wire [8:0]  i_danger_hi,
     output wire        o_busy,
     output wire        o_done,
     output wire [2:0]  o_state,
@@ -63,7 +66,14 @@ module tdc_test_top #(
     //   ILA 리드아웃 스캐너를 걷어내고 그 자리를 AXI 가 받는다.
     input  wire        i_axi_clk,
     input  wire [8:0]  i_histo_addr,
-    output wire [31:0] o_histo_data
+    output wire [31:0] o_histo_data,
+
+    // ★ [2026-09-05 추가] 캡처 버퍼 (Mode 2 = 외부 LVDS 실측)
+    input  wire [12:0] i_cap_n,        // 이만큼 모으면 끝낸다 (최대 4096)
+    output wire [12:0] o_cap_cnt,      // 지금까지 모인 수
+    input  wire [11:0] i_cap_addr,     // 읽기 주소 (AXI 도메인)
+    input  wire        i_cap_hi,       // 0=하위 워드 1=상위 워드
+    output wire [31:0] o_cap_data
 );
 
 
@@ -74,6 +84,8 @@ module tdc_test_top #(
     // ★ 2026-09-05 : 시퀀서(tdc_seq)와 주고받는 신호. 인스턴스는 §6 아래에 있다.
     wire        seq_ro_en, seq_histo_en, seq_histo_clr;
     wire        histo_hit_accepted, histo_hit_dropped;
+    wire        seq_cap_en, seq_cap_clr;
+    wire        cap_full, cap_written, cap_lost;
 
     // ==========================================
     // 1. Clock Generation & MMCM Phase Shifter
@@ -309,17 +321,31 @@ module tdc_test_top #(
     wire tdc_hit_in;
     wire tdc_clk;
 
+    // ★ 2026-09-05 : Mode 1(RO)과 Mode 2(EXT)는 히트 소스를 런타임에 고른다.
+    //   [왜 되나] 두 모드는 샘플링 클럭이 똑같이 clk_200_fixed 다. 클럭이 같으니
+    //     고를 것은 데이터 한 줄(히트 네트)뿐이고, 그건 그냥 먹스다. 비트스트림
+    //     하나로 두 모드를 쓴다.
+    //   [왜 Mode 0 은 안 되나] DPS 는 clk_200_shifted 로 샘플링한다. 런타임에
+    //     고르려면 지연선의 샘플링 클럭에 BUFGMUX 를 달아야 하는데, 그러면 탭 폭이
+    //     흔들릴 위험이 있다. 대신 "클럭 대신 히트를 흔드는" 재설계를 따로 할 것.
+    //     그때까지 Mode 0 은 OPERATION_MODE=0 으로 빌드해야 한다.
+    //
+    //   ★ 히트 네트에 먹스가 붙는 것 자체는 괜찮은가 :
+    //     hit 은 CYINIT 만 구동해야 한다는 규칙(led[2] 사례)은 '팬아웃'에 관한
+    //     것이지 '앞단 로직'에 관한 것이 아니다. 먹스는 hit 앞에 있고 출력은
+    //     여전히 CYINIT 하나만 구동한다. 다만 먹스 LUT 이 끼면서 에지 slew 가
+    //     달라질 수 있으므로, 이번 빌드의 히스토그램 모양을 2026-09-05 3단계
+    //     결과와 대조해 진입 트랜지언트가 나빠지지 않았는지 확인할 것.
     generate
         if (OPERATION_MODE == 0) begin : MODE_0_MMCM_SWEEP
             assign tdc_hit_in = test_hit_sync;
             assign tdc_clk    = clk_200_shifted;
         end
-        else if (OPERATION_MODE == 1) begin : MODE_1_RO_TEST
-            assign tdc_hit_in = hit_random;
-            assign tdc_clk    = clk_200_fixed;
-        end
-        else begin : MODE_2_EXT_STM32
-            assign tdc_hit_in = ext_hit_in;
+        else begin : MODE_RUNTIME_MUX
+            // 00=off  01=RO  10=DPS(이 빌드에서는 미지원)  11=EXT
+            assign tdc_hit_in = (i_ctrl_hit_src == 2'b01) ? hit_random :
+                                (i_ctrl_hit_src == 2'b11) ? ext_hit_in :
+                                                            1'b0;
             assign tdc_clk    = clk_200_fixed;
         end
     endgenerate
@@ -346,6 +372,8 @@ module tdc_test_top #(
         .clk         (tdc_clk),
         .rst_n       (clk_locked),
         .hit         (tdc_hit_in),
+        .danger_lo   (i_danger_lo),      // ★ 2026-09-05
+        .danger_hi   (i_danger_hi),
         .ts_coarse   (raw_ts_coarse),
         .ts_fine_idx (raw_ts_fine_idx),
         .ts_valid    (raw_ts_valid)
@@ -462,6 +490,11 @@ module tdc_test_top #(
         .die_temp      (die_temp_at_meas),
         .hit_accepted  (histo_hit_accepted),
         .hit_dropped   (histo_hit_dropped),
+        .cap_full      (cap_full),
+        .cap_written   (cap_written),
+        .cap_lost      (cap_lost),
+        .cap_en        (seq_cap_en),
+        .cap_clr       (seq_cap_clr),
         .ro_en         (seq_ro_en),
         .histo_en      (seq_histo_en),
         .histo_clr     (seq_histo_clr),
@@ -475,6 +508,35 @@ module tdc_test_top #(
         .temp_at_start (o_temp_start),
         .temp_at_end   (o_temp_end),
         .snap_tgl      (o_snap_tgl)
+    );
+
+    // ==========================================================
+    // ★ 2026-09-05 : 캡처 버퍼 (Mode 2 = 외부 LVDS 실측)
+    //   히스토그램이 "탭마다 몇 발" 이라면 이쪽은 "히트 하나하나의 시각" 이다.
+    //   final_timestamp_ps 는 상위 비트가 안 쓰이므로 48비트만 넘긴다
+    //   (coarse 32비트 x 5000 ps 라 이론 최대가 48비트를 넘지 않는다).
+    // ==========================================================
+    tdc_capture #(
+        .ADDR_WIDTH (12)                    // 4096 발
+    ) u_cap (
+        .clk          (tdc_clk),
+        .rst_n        (clk_locked),
+        .en           (seq_cap_en),
+        .clr          (seq_cap_clr),
+        .cap_fmt      (i_ctrl_cap_fmt),
+        .ts_valid     (final_ts_valid),
+        .timestamp_ps (final_timestamp_ps[47:0]),
+        .ts_coarse    (aligned_coarse),
+        .ts_fine_idx  (aligned_fine_idx),
+        .cap_n        (i_cap_n),
+        .cap_cnt      (o_cap_cnt),
+        .full         (cap_full),
+        .hit_written  (cap_written),
+        .hit_lost     (cap_lost),
+        .clk_b        (i_axi_clk),
+        .read_addr    (i_cap_addr),
+        .read_hi      (i_cap_hi),
+        .read_data    (o_cap_data)
     );
 
     assign led[0] = clk_locked;

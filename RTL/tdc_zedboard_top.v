@@ -204,6 +204,12 @@ module tdc_zedboard_top #(
     wire [31:0] seq_hit_cnt, seq_drop_cnt, seq_ro_start, seq_ro_end;
     wire [15:0] seq_temp_start, seq_temp_end;
     wire [31:0] ctrl_target_hits, ctrl_settle_n;
+    // ★ 2026-09-05 : 캡처 버퍼 (Mode 2)
+    wire [12:0] ctrl_cap_n, cap_cnt;
+    wire [8:0]  ctrl_danger_lo, ctrl_danger_hi;
+    wire [11:0] cap_addr;
+    wire        cap_hi;
+    wire [31:0] cap_data;
 
     // ★ 2026-09-05 : ctrl_histo_clr 를 아래 u_core 인스턴스가 먼저 쓰므로
     //   선언이 여기 있어야 한다 (Verilog 는 암시적 선언을 1비트로 만들어 버린다).
@@ -241,8 +247,11 @@ module tdc_zedboard_top #(
         .i_ctrl_start   (ctrl_start),
         .i_ctrl_stop    (ctrl_stop),
         .i_ctrl_hit_src (ctrl_hit_src),
+        .i_ctrl_cap_fmt (ctrl_cap_fmt),
         .i_target_hits  (ctrl_target_hits),
         .i_settle_n     (ctrl_settle_n),
+        .i_danger_lo    (ctrl_danger_lo),
+        .i_danger_hi    (ctrl_danger_hi),
         .o_busy         (seq_busy),
         .o_done         (seq_done),
         .o_state        (seq_state),
@@ -252,7 +261,14 @@ module tdc_zedboard_top #(
         .o_ro_end       (seq_ro_end),
         .o_temp_start   (seq_temp_start),
         .o_temp_end     (seq_temp_end),
-        .o_snap_tgl     (seq_snap_tgl)
+        .o_snap_tgl     (seq_snap_tgl),
+
+        // ★ 2026-09-05 : 캡처 버퍼
+        .i_cap_n        (ctrl_cap_n),
+        .o_cap_cnt      (cap_cnt),
+        .i_cap_addr     (cap_addr),
+        .i_cap_hi       (cap_hi),
+        .o_cap_data     (cap_data)
     );
 
     // =========================================================================
@@ -306,6 +322,12 @@ module tdc_zedboard_top #(
         .histo_addr      (histo_addr),
         .histo_data      (histo_data),
 
+        // ★ 2026-09-05 : 캡처 버퍼
+        .cap_addr        (cap_addr),
+        .cap_hi          (cap_hi),
+        .cap_data        (cap_data),
+        .stat_cap_cnt    (cap_cnt),
+
         // ★ 2026-09-05 : 시퀀서 스냅샷
         .stat_snap_tgl   (seq_snap_tgl),
         .stat_hit_cnt    (seq_hit_cnt),
@@ -324,7 +346,10 @@ module tdc_zedboard_top #(
         .ctrl_cap_fmt    (ctrl_cap_fmt),
         .ctrl_phase_tgt  (ctrl_phase_tgt),    // ★ 2026-09-05 : BTNU 대체
         .ctrl_target_hits(ctrl_target_hits),
-        .ctrl_settle_n   (ctrl_settle_n)
+        .ctrl_settle_n   (ctrl_settle_n),
+        .ctrl_cap_n      (ctrl_cap_n),
+        .ctrl_danger_lo  (ctrl_danger_lo),
+        .ctrl_danger_hi  (ctrl_danger_hi)
     );
 
 endmodule

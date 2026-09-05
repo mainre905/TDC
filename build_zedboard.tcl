@@ -80,6 +80,7 @@ set VSRC [list \
     [file join $SRC_ROOT RTL dna_reader.v]         \
     [file join $SRC_ROOT RTL tdc_axi_regs.v]       \
     [file join $SRC_ROOT RTL tdc_seq.v]            \
+    [file join $SRC_ROOT RTL tdc_capture.v]        \
 ]
 foreach f $VSRC { if {![file exists $f]} { error "소스 없음: $f" } }
 add_files -norecurse -fileset sources_1 $VSRC

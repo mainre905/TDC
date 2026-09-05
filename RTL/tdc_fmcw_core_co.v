@@ -53,6 +53,21 @@ module tdc_fmcw_core_co #(
     input wire rst_n,
     input wire hit,
 
+    // ★ 2026-09-05 : danger 임계값을 상수에서 입력으로 바꿨다.
+    //   [왜] 이 값은 "히트가 클럭 에지 근처인가" 를 fine 탭 번호로 판단하는 경계다.
+    //     그런데 창(히트가 실제로 찍히는 탭 범위)의 위치는 히트 경로 지연에 따라
+    //     통째로 미끄러진다. 2026-09-05 에 HIT_SRC 런타임 먹스(LUT4 하나)가 들어가자
+    //     히트가 약 370 ps 늦어져 창이 탭 2~321 에서 24~349 로 옮겨갔고,
+    //     아래쪽 가드가 630 ps -> 228 ps 로 얇아졌다.
+    //     경계가 상수면 빌드마다 사람이 확인해서 고쳐야 한다.
+    //   [어떻게 쓰나] PS 가 히스토그램에서 창의 첫/끝 탭을 읽어 스스로 정한다.
+    //     소프트웨어가 정하므로 재빌드 없이 실험할 수도 있다 — 값을 좁혀가며
+    //     타임스탬프가 5000 ps 튀는 지점을 찾으면 그게 coarse 카운터의 실제
+    //     불안정 구간이다. 이 프로젝트에서 한 번도 측정된 적이 없는 값이다.
+    //   [기본값] 40 / 220. 종전 상수와 같아 동작이 바뀌지 않는다.
+    input wire [8:0]   danger_lo,
+    input wire [8:0]   danger_hi,
+
     output reg [31:0]  ts_coarse,
     output reg [8:0]   ts_fine_idx,
     output reg         ts_valid
@@ -123,8 +138,8 @@ reg [8:0]  fine_idx_stg4;
 //  임계값은 localparam 으로 이름을 붙여 밖에서 보이게 했다. 값 자체는 안 바꿨다.
 //  (이 값들은 옛 O 탭 분포로 튜닝된 것이고 아직 재튜닝된 적이 없다 — 아래 주석 참조.
 //   AXI 단계에서 레지스터로 뺄 항목이다.)
-localparam [8:0] DANGER_LO = 9'd40;    // 이번 에지 바로 앞 -> coarse_0 가 전이 중
-localparam [8:0] DANGER_HI = 9'd220;   // 지난 에지 바로 뒤 -> 역시 에지 근처
+// ★ 2026-09-05 : DANGER_LO / DANGER_HI 는 이제 상수가 아니라 입력 포트다
+//   (danger_lo / danger_hi). 위 포트 선언의 주석 참조.
 
 // ★ [2026-09-03] 384탭(96단) 확장 — popcount 트리를 단수에서 유도하도록 파라미터화
 //
@@ -325,7 +340,7 @@ always @(posedge clk or negedge rst_n) begin
             //   분포가 달라 재튜닝이 필요할 수 있는데 아직 안 했다. 또 탭 번호 단위라
             //   보드마다 LSB 가 다르면 뜻이 달라진다 (40탭 = 집 Zybo 671 ps /
             //   ZedBoard 624 ps). AXI 단계에서 레지스터로 뺄 것.
-            if (fine_idx_stg4 < DANGER_LO || fine_idx_stg4 > DANGER_HI) begin
+            if (fine_idx_stg4 < danger_lo || fine_idx_stg4 > danger_hi) begin
                 ts_coarse <= captured_c180_stg4_plus1;
             end else begin
                 ts_coarse <= captured_c0_stg4;

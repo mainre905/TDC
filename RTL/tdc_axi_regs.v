@@ -50,7 +50,7 @@ module tdc_axi_regs #(
     //   필요하다. 8비트로는 0x1000 이 0x00 으로 접혀 ID 레지스터와 충돌한다.
     parameter integer C_S_AXI_ADDR_WIDTH = 16,    // 64 KB 어퍼처 전체
     parameter integer CHAIN_STAGES       = 96,    // BUILD 레지스터에 실어 보낼 값
-    parameter [7:0]   REGMAP_VER         = 8'd4   // ★ 2026-09-05 : 3 -> 4 (시퀀서)
+    parameter [7:0]   REGMAP_VER         = 8'd6   // ★ 2026-09-05 : 5 -> 6 (DANGER 레지스터)
 )(
     // ---------------- AXI4-Lite 슬레이브 (s_axi_aclk 도메인) ----------------
     input  wire                            s_axi_aclk,
@@ -117,6 +117,12 @@ module tdc_axi_regs #(
     output reg  [8:0]                      histo_addr,
     input  wire [31:0]                     histo_data,
 
+    // ★ 2026-09-05 추가 : 캡처 버퍼 읽기 창 (s_axi_aclk 도메인)
+    output reg  [11:0]                     cap_addr,
+    output reg                             cap_hi,
+    input  wire [31:0]                     cap_data,
+    input  wire [12:0]                     stat_cap_cnt,
+
     // 제어 출력 (AXI 도메인 -> 이 모듈이 TDC 도메인으로 동기화해서 내보낸다)
     output reg  [1:0]                      ctrl_hit_src,   // 00=off 01=RO 10=DPS 11=EXT
     output reg                             ctrl_start,
@@ -126,7 +132,10 @@ module tdc_axi_regs #(
     output reg                             ctrl_cap_fmt,
     output reg  [8:0]                      ctrl_phase_tgt, // ★ 2026-09-05 : BTNU 대체
     output reg  [31:0]                     ctrl_target_hits,
-    output reg  [31:0]                     ctrl_settle_n
+    output reg  [31:0]                     ctrl_settle_n,
+    output reg  [12:0]                     ctrl_cap_n,
+    output reg  [8:0]                      ctrl_danger_lo,
+    output reg  [8:0]                      ctrl_danger_hi
 );
 
     // ---------------- 레지스터 주소 (워드 단위) ----------------
@@ -155,13 +164,30 @@ module tdc_axi_regs #(
                      A_ROSTA  = 6'hB,   // 0x2C  R   측정 시작 시 RO 에지 수
                      A_ROEND  = 6'hC,   // 0x30  R   측정 종료 시 RO 에지 수
                      A_TEMPSE = 6'hD,   // 0x34  R   {끝 온도[31:16], 시작 온도[15:0]}
-                     A_DROP   = 6'hE;   // 0x38  R   데드타임에 버려진 히트 수
+                     A_DROP   = 6'hE,   // 0x38  R   데드타임에 버려진 히트 수
+                     // ★ 2026-09-05 추가 — 캡처 버퍼 (맵 버전 5)
+                     A_CAPN   = 6'hF,   // 0x3C  RW  캡처할 히트 수 (1..4096)
+                     A_CAPCNT = 6'h10,  // 0x40  R   지금까지 모인 수
+                     // ★ 2026-09-05 : danger 임계값 (맵 버전 6)
+                     //   {danger_hi[24:16], danger_lo[8:0]}. 기본 220/40.
+                     //   이 값은 "히트가 클럭 에지 근처인가" 를 fine 탭 번호로
+                     //   판단하는 경계다. 창(히트가 찍히는 탭 범위)의 위치가
+                     //   히트 경로 지연에 따라 미끄러지므로 상수로 둘 수 없다.
+                     //   상세는 tdc_fmcw_core_co.v 의 danger_lo 포트 주석 참조.
+                     A_DANGER = 6'h11;  // 0x44  RW
 
     // ★ 2026-09-05 : 영역 구분은 주소 비트 12 로 한다.
     //   addr[12]=0 -> 위 레지스터들 (0x0000~0x0FFF, 하위 8비트만 디코딩)
     //   addr[12]=1 -> 히스토그램   (0x1000 + 탭*4, 탭 0..383 이면 0x1000~0x15FF)
     //   64K 어퍼처 안이므로 BD 의 주소 할당은 그대로 두면 된다.
     localparam integer HISTO_SEL_BIT = 12;
+
+    // ★ 2026-09-05 : 캡처 버퍼는 어퍼처 위쪽 절반(0x8000~0xFFFF, 32 KB)에 둔다.
+    //   히트 하나가 8바이트(2워드)이므로 4096발이 딱 32 KB 다.
+    //     주소 = 0x8000 + 히트번호*8 + (0=하위 워드, 4=상위 워드)
+    //     히트번호 = addr[14:3],  워드 선택 = addr[2]
+    //   히스토그램(비트 12)과 겹치지 않도록 최상위 비트로 갈랐다.
+    localparam integer CAP_SEL_BIT = 15;
 
     localparam [31:0] ID_MAGIC   = 32'h5444_4302;         // "TD" "C" + regmap ver
     localparam [15:0] NUM_TAPS_C = CHAIN_STAGES * 4;
@@ -180,6 +206,9 @@ module tdc_axi_regs #(
     //    없어 넉넉히 잡은 것이다. RO_CNT 가 몇 게이트 만에 수렴하는지 재서
     //    실측값으로 바꿀 것.
     reg [31:0] settle_reg = 32'd20000;
+    reg [12:0] cap_n_reg   = 13'd4096;   // ★ 2026-09-05 : 캡처할 히트 수
+    reg [8:0]  danger_lo_reg = 9'd40;    // ★ 2026-09-05 : 종전 상수와 같은 기본값
+    reg [8:0]  danger_hi_reg = 9'd220;
     reg        ctrl_upd_tgl;      // CTRL/PHASE 를 쓸 때마다 토글. CDC 용.
     reg        bvalid_r;
 
@@ -198,6 +227,9 @@ module tdc_axi_regs #(
             phase_reg    <= 9'd0;
             target_reg   <= 32'd0;
             settle_reg   <= 32'd20000;
+            cap_n_reg    <= 13'd4096;
+            danger_lo_reg <= 9'd40;
+            danger_hi_reg <= 9'd220;
             ctrl_upd_tgl <= 1'b0;
             bvalid_r     <= 1'b0;
         end else begin
@@ -225,6 +257,18 @@ module tdc_axi_regs #(
                     if (s_axi_wstrb[1]) target_reg[15: 8] <= s_axi_wdata[15: 8];
                     if (s_axi_wstrb[2]) target_reg[23:16] <= s_axi_wdata[23:16];
                     if (s_axi_wstrb[3]) target_reg[31:24] <= s_axi_wdata[31:24];
+                    ctrl_upd_tgl <= ~ctrl_upd_tgl;
+                end
+                if (wr_word == A_CAPN) begin
+                    if (s_axi_wstrb[0]) cap_n_reg[ 7:0] <= s_axi_wdata[ 7:0];
+                    if (s_axi_wstrb[1]) cap_n_reg[12:8] <= s_axi_wdata[12:8];
+                    ctrl_upd_tgl <= ~ctrl_upd_tgl;
+                end
+                if (wr_word == A_DANGER) begin
+                    if (s_axi_wstrb[0]) danger_lo_reg[7:0] <= s_axi_wdata[7:0];
+                    if (s_axi_wstrb[1]) danger_lo_reg[8]   <= s_axi_wdata[8];
+                    if (s_axi_wstrb[2]) danger_hi_reg[7:0] <= s_axi_wdata[23:16];
+                    if (s_axi_wstrb[3]) danger_hi_reg[8]   <= s_axi_wdata[24];
                     ctrl_upd_tgl <= ~ctrl_upd_tgl;
                 end
                 if (wr_word == A_SETTLE) begin
@@ -355,11 +399,22 @@ module tdc_axi_regs #(
     //   이걸 안 하고 즉시 rvalid 를 올리면 '직전 주소의 값'이 읽힌다 —
     //   ILA 시절 probe_read_addr_d1 로 해결했던 것과 정확히 같은 함정이다.
     reg [1:0] hpend = 2'b00;
+    reg       cap_rd = 1'b0;         // 이번 읽기가 캡처 버퍼인가
     wire      histo_busy = |hpend;
+
+    // cap_cnt 는 tdc_clk 도메인의 13비트다. 캡처 중에는 계속 변하므로 2FF 로
+    // 넘긴다 — 진행 상황을 사람이 폴링해서 보는 값이라 한 번 잘못 읽어도
+    // 다음 폴링에서 바로잡힌다. 최종값은 DONE 이 뜬 뒤에 읽으면 정확하다.
+    (* ASYNC_REG = "TRUE" *) reg [12:0] cap_cnt_d1, cap_cnt_d2;
+    always @(posedge s_axi_aclk) begin
+        cap_cnt_d1 <= stat_cap_cnt;
+        cap_cnt_d2 <= cap_cnt_d1;
+    end
 
     // 진행 중인 히스토그램 읽기가 있으면 새 요청을 받지 않는다.
     wire rd_go   = s_axi_arvalid & ~rvalid_r & ~histo_busy;
-    wire is_hist = s_axi_araddr[HISTO_SEL_BIT];
+    wire is_cap  = s_axi_araddr[CAP_SEL_BIT];                        // 0x8000 이상
+    wire is_hist = ~s_axi_araddr[CAP_SEL_BIT] & s_axi_araddr[HISTO_SEL_BIT];
 
     assign s_axi_arready = rd_go;
     assign s_axi_rvalid  = rvalid_r;
@@ -374,6 +429,9 @@ module tdc_axi_regs #(
             rvalid_r   <= 1'b0;
             hpend      <= 2'b00;
             histo_addr <= 9'd0;
+            cap_addr   <= 12'd0;
+            cap_hi     <= 1'b0;
+            cap_rd     <= 1'b0;
         end else begin
             hpend <= { hpend[0], 1'b0 };     // 기본은 한 칸 밀기
 
@@ -381,6 +439,15 @@ module tdc_axi_regs #(
                 // 0x1000 + 탭*4 -> 탭 번호는 주소 비트 [10:2]
                 histo_addr <= s_axi_araddr[10:2];
                 hpend      <= 2'b01;
+                cap_rd     <= 1'b0;
+            end else if (rd_go && is_cap) begin
+                // ★ 0x8000 + 히트번호*8 + (0 또는 4)
+                //   히트번호 = addr[14:3], 워드 선택 = addr[2]
+                //   히스토그램과 같은 2클럭 지연을 쓴다 (BRAM 출력이 레지스터드).
+                cap_addr <= s_axi_araddr[14:3];
+                cap_hi   <= s_axi_araddr[2];
+                hpend    <= 2'b01;
+                cap_rd   <= 1'b1;
             end else if (rd_go) begin
                 case (rd_word)
                     A_ID:     rdata_r <= ID_MAGIC;
@@ -398,11 +465,14 @@ module tdc_axi_regs #(
                     A_ROEND:  rdata_r <= ro_end_lat;
                     A_TEMPSE: rdata_r <= { tmp_end_lat, tmp_sta_lat };
                     A_DROP:   rdata_r <= drop_cnt_lat;
+                    A_CAPN:   rdata_r <= { 19'd0, cap_n_reg };
+                    A_CAPCNT: rdata_r <= { 19'd0, cap_cnt_d2 };
+                    A_DANGER: rdata_r <= { 7'd0, danger_hi_reg, 7'd0, danger_lo_reg };
                     default:  rdata_r <= 32'hDEAD_0000;          // 없는 주소를 눈에 띄게
                 endcase
                 rvalid_r <= 1'b1;
             end else if (hpend[1]) begin
-                rdata_r  <= histo_data;      // BRAM 출력이 유효해진 사이클
+                rdata_r  <= cap_rd ? cap_data : histo_data;  // BRAM 출력 유효 사이클
                 rvalid_r <= 1'b1;
             end else if (rvalid_r && s_axi_rready) begin
                 rvalid_r <= 1'b0;
@@ -431,6 +501,9 @@ module tdc_axi_regs #(
             ctrl_phase_tgt <= 9'd0;
             ctrl_target_hits <= 32'd0;
             ctrl_settle_n    <= 32'd20000;
+            ctrl_cap_n       <= 13'd4096;
+            ctrl_danger_lo   <= 9'd40;
+            ctrl_danger_hi   <= 9'd220;
         end else begin
             tgl_d1 <= ctrl_upd_tgl;   // 동기화 1단 (비동기 입력)
             tgl_d2 <= tgl_d1;         // 동기화 2단 (메타스테이빌리티 해소)
@@ -446,6 +519,9 @@ module tdc_axi_regs #(
                 ctrl_phase_tgt   <= phase_reg;   // ★ 2026-09-05
                 ctrl_target_hits <= target_reg;
                 ctrl_settle_n    <= settle_reg;
+                ctrl_cap_n       <= cap_n_reg;
+                ctrl_danger_lo   <= danger_lo_reg;
+                ctrl_danger_hi   <= danger_hi_reg;
             end
         end
     end
