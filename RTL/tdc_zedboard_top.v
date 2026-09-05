@@ -51,7 +51,17 @@ module tdc_zedboard_top #(
     //   0 : Hit = 내부 Test Sync | 1 : Hit = Ring Osc | 2 : Hit = FMC LVDS
     //   ※ 새 모드 정의(0=RO 코드밀도 / 1=DPS 지터 / 2=실측)는 AXI 시퀀서가
     //     들어오는 2단계에서 CTRL.HIT_SRC 로 옮겨간다.
-    parameter integer OPERATION_MODE = 1
+    parameter integer OPERATION_MODE = 1,
+
+    // ★ 2026-09-05 추가 — 히트 입력을 어디서 받나
+    //   0 = FMC LPC LA27_P/N 차동쌍 (TLV3605 LVDS 비교기). 기본값.
+    //   1 = PMOD 단선 (STM32 를 점퍼로 물린 임시 신호원)
+    //
+    //   [왜 파라미터로 두나] 고속 비교기가 회사에 있어 당장 LVDS 를 못 받는다.
+    //   그렇다고 RTL 을 고쳐 놓으면 비교기가 돌아왔을 때 되돌리는 일이 또 생기고,
+    //   그 과정에서 실수가 난다. 파라미터 하나면 빌드 인자만 바꿔 왕복할 수 있다.
+    //   두 포트와 두 XDC 제약은 항상 다 존재하며, 쓰지 않는 쪽은 그냥 남는다.
+    parameter integer HIT_INPUT = 0
 )(
     // ---------------- Zynq PS 전용 핀 (Vivado 가 자동 매핑, XDC 불필요) ----------
     inout  wire [14:0] DDR_addr,
@@ -82,6 +92,7 @@ module tdc_zedboard_top #(
     input  wire        btn_shift,    // BTNU(T18). 위상 목표를 한 칸씩 올리는 임시 버튼
     input  wire        hit_lvds_p,   // E21, FMC LA27_P  <- TLV3605 LVDS+
     input  wire        hit_lvds_n,   // D21, FMC LA27_N  <- TLV3605 LVDS-
+    input  wire        hit_pmod,     // Y11, PMOD JA1    <- STM32 (HIT_INPUT=1 일 때)
     output wire [3:0]  led
 );
 
@@ -98,14 +109,24 @@ module tdc_zedboard_top #(
     // -------------------------------------------------------------------------
     wire hit_from_fmc;
 
-    IBUFDS #(
-        .DIFF_TERM    ("TRUE"),      // 내부 100옴 차동 종단 (VCCO 2.5V 필요)
-        .IBUF_LOW_PWR ("FALSE")      // 성능 우선
-    ) u_hit_ibufds (
-        .I  (hit_lvds_p),
-        .IB (hit_lvds_n),
-        .O  (hit_from_fmc)
-    );
+    // ★ 2026-09-05 : HIT_INPUT 으로 고른다. 어느 쪽이든 버퍼 출력은 다른 로직을
+    //   전혀 거치지 않고 곧장 코어의 hit 입력으로 간다 (에지 slew 보호).
+    generate
+        if (HIT_INPUT == 0) begin : HIT_FMC_LVDS
+            IBUFDS #(
+                .DIFF_TERM    ("TRUE"),  // 내부 100옴 차동 종단 (VCCO 2.5V 필요)
+                .IBUF_LOW_PWR ("FALSE")  // 성능 우선
+            ) u_hit_ibufds (
+                .I  (hit_lvds_p),
+                .IB (hit_lvds_n),
+                .O  (hit_from_fmc)
+            );
+        end else begin : HIT_PMOD_SE
+            // 단선 입력. Vivado 가 IBUF 를 자동으로 넣는다.
+            // 뱅크 13 은 ZedBoard 에서 3.3V 고정이라 J18 점퍼와 무관하다.
+            assign hit_from_fmc = hit_pmod;
+        end
+    endgenerate
 
     // =========================================================================
     // PS7 블록 디자인 (tcl/bd_ps_sys.tcl 로 생성)

@@ -17,6 +17,8 @@
 #
 #    tclargs 첫 번째 = OPERATION_MODE (0/1/2, 기본 1)
 #           두 번째 = 프로젝트 폴더 이름 (기본 vivado/zed_mode<N>)
+#           세 번째 = 1 이면 합성~비트스트림까지 이어서 실행
+#           네 번째 = HIT_INPUT (0=FMC LVDS 기본 / 1=PMOD 단선 Y11)
 #
 #  [만들어지는 것]
 #    - 소스 7개 + XDC 1개를 **참조로** 추가 (복사 안 함 → 이 저장소를 고치면 바로 반영)
@@ -41,6 +43,14 @@ set PRJ_NAME "zed_mode$OP_MODE"
 if {[info exists argv] && [llength $argv] >= 2} { set PRJ_NAME [lindex $argv 1] }
 set PRJ_DIR  [file join $SRC_ROOT vivado $PRJ_NAME]
 
+# ★ 2026-09-05 : 히트 입력 선택 (네 번째 인자)
+#   0 = FMC LPC LA27_P/N 차동쌍 (TLV3605 LVDS 비교기). 기본값.
+#   1 = PMOD 단선 Y11 (STM32 를 점퍼로 물린 임시 신호원)
+#   RTL 을 고치지 않고 왕복할 수 있게 파라미터로 뒀다. 상세는
+#   tdc_zedboard_top.v 의 HIT_INPUT 파라미터 주석 참조.
+set HIT_INPUT 0
+if {[info exists argv] && [llength $argv] >= 4} { set HIT_INPUT [lindex $argv 3] }
+
 # 384탭(96단) 기준. 체인 단수를 바꾸면 python/gen_chain_xdc.py 와 함께 여기도 고칠 것.
 set CHAIN_STAGES 96
 set NUM_TAPS     [expr {$CHAIN_STAGES * 4}]
@@ -50,7 +60,8 @@ puts "=========================================================="
 puts " ZedBoard 프로젝트 생성"
 puts "   소스 루트     : $SRC_ROOT"
 puts "   프로젝트      : $PRJ_DIR"
-puts "   OPERATION_MODE: $OP_MODE   (0=DPS스윕 / 1=링오실레이터 / 2=외부LVDS)"
+puts "   OPERATION_MODE: $OP_MODE   (0=DPS스윕 / 1=링오실레이터 / 2=외부입력)"
+puts "   HIT_INPUT     : $HIT_INPUT   (0=FMC LVDS E21/D21 / 1=PMOD 단선 Y11)"
 puts "   캐리체인      : ${CHAIN_STAGES}단 = ${NUM_TAPS}탭"
 puts "   ROM COE       : $COE_FILE"
 puts "=========================================================="
@@ -99,7 +110,7 @@ add_files -norecurse [file join $PRJ_DIR ${PRJ_NAME}.gen sources_1 bd ps_sys hdl
 puts "\[*\] 블록 디자인 ps_sys 생성 + 래퍼 추가"
 
 set_property top tdc_zedboard_top [current_fileset]
-set_property generic "OPERATION_MODE=$OP_MODE" [current_fileset]
+set_property generic "OPERATION_MODE=$OP_MODE HIT_INPUT=$HIT_INPUT" [current_fileset]
 update_compile_order -fileset sources_1
 puts "\[*\] 소스 7개 + XDC 1개 추가 완료. 최상위 = tdc_zedboard_top, OPERATION_MODE=$OP_MODE"
 

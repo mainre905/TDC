@@ -92,6 +92,29 @@ set_property DIFF_TERM TRUE [get_ports hit_lvds_n]
 # 히트는 클럭과 완전히 비동기다(그게 측정 대상이다). 타이밍 분석에서 제외한다.
 set_false_path -from [get_ports hit_lvds_p]
 
+# =====================================================================
+# ★ 2026-09-05 추가 — PMOD 단선 히트 입력 (STM32 신호원용, 임시)
+# =====================================================================
+#  [왜 있나] 고속 LVDS 비교기가 회사에 있어 당장은 FMC 로 신호를 못 받는다.
+#    대신 STM32 를 PMOD 에 점퍼로 물려 신호원으로 쓴다.
+#
+#  [되돌리는 법] RTL 을 고칠 필요 없다. 빌드 인자 하나만 바꾸면 된다:
+#      build_zedboard.tcl -tclargs <mode> <이름> <빌드?> <HIT_INPUT>
+#        HIT_INPUT = 0  ->  FMC LVDS (E21/D21, 기본값)
+#        HIT_INPUT = 1  ->  PMOD 단선 (아래 핀)
+#    두 포트와 두 제약이 항상 다 존재하고, 쓰지 않는 쪽은 Vivado 가 그냥 둔다.
+#
+#  [PMOD 가 오히려 편한 점] 뱅크 13 은 ZedBoard 에서 3.3V 고정이라
+#    J18 점퍼(FMC VADJ 2.5V)를 신경 쓸 필요가 없다.
+#
+#  ★ 핀 확인 필요 : Y11 이 JA1 커넥터의 1번 핀이라는 대응은 ZedBoard 매뉴얼
+#    기준이며 이 저장소에서 문서로 대조한 적이 없다. 실크스크린이나 ZedBoard
+#    master XDC 로 한 번 확인할 것. (Vivado 로 확인한 것은 "Y11 은 뱅크 13 의
+#    범용 IO 다" 까지다 — get_package_pins Y11, bank=13, IS_GENERAL_PURPOSE=1)
+set_property PACKAGE_PIN Y11 [get_ports hit_pmod]
+set_property IOSTANDARD LVCMOS33 [get_ports hit_pmod]
+set_false_path -from [get_ports hit_pmod]
+
 # 클럭 MUX로 인한 Inter-Clock False Path 설정 (Logically Exclusive)
 #   래퍼가 생겨 계층이 한 단 깊어졌으므로 와일드카드로 찾는다.
 set_clock_groups -logically_exclusive \
