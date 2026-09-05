@@ -19,6 +19,21 @@
 #    ps7_init 을 먼저 해야 PS 의 PLL 이 설정되어 FCLK_CLK0 가 나온다.
 #    FCLK 가 없으면 AXI 도메인도 MMCM 도 돌지 않아 아무것도 안 읽힌다.
 #    그 다음에 비트스트림을 굽는다.
+#
+#  [★ 2026-09-05 수정 — 첫 실행에서 이 스크립트가 그대로는 안 돌았다]
+#    (1) 타깃 필터가 {name =~ "*PS7*"} 였는데, 실제 타깃 이름에 PS7 이 없다.
+#        XSCT 가 보고하는 이름은 APU / "ARM Cortex-A9 MPCore #0" / xc7z020 이다.
+#        -> {name =~ "*Cortex-A9*#0*"} 로 바꿨다. 안 그러면 첫 줄에서 죽는다.
+#    (2) connect 직후 targets 가 비어 있을 수 있다. hw_server 가 그 자리에서 새로
+#        기동되면 JTAG 체인 열거가 아직 안 끝났기 때문이다(실제로 겪었다).
+#        -> after 3000 을 넣었다.
+#    (3) fpga -file 은 FPGA 타깃(xc7z020)을, mrd/mwr 은 ARM 타깃을 선택한 상태를
+#        요구한다. -> 굽기 전후로 타깃을 옮긴다.
+#
+#  [2026-09-05 실측 결과 — 4/4 통과]
+#    ID=0x54444302  BUILD=0x01806002  DNA=0xBD996854  STATUS=0x00000005
+#    STATUS[0] MMCM locked=1 -> (B)구조(FCLK_CLK0 -> MMCM -> 200 MHz)가 실물에서 동작.
+#    CTRL 에 0x47 쓰고 되읽기 성공 -> AXI 쓰기/읽기 채널 양방향 정상.
 # =============================================================================
 
 set PRJ  C:/Work/FPGA/Project/Source/TDC/vivado/zed_axi
@@ -37,7 +52,12 @@ puts "\[*\] 비트스트림 : $BIT"
 puts "\[*\] ps7_init   : $PS7_INIT"
 
 connect
-targets -set -nocase -filter {name =~ "*PS7*"} -index 0
+after 3000                  ;# ★ hw_server 가 JTAG 체인을 열거할 시간. 없으면 targets 가 빈다.
+
+# ---- ARM 코어 선택 : ps7_init 과 mrd/mwr 은 CPU 타깃에서 돈다 ----
+targets -set -nocase -filter {name =~ "*Cortex-A9*#0*"}
+catch {stop}                ;# 이미 돌던 코드가 있으면 세운다. 없어도 무해하므로 catch.
+after 200
 
 # ---- PS 초기화 : PLL 설정 -> FCLK_CLK0 가 나오기 시작한다 ----
 source $PS7_INIT
@@ -45,10 +65,14 @@ ps7_init
 ps7_post_config
 puts "\[*\] ps7_init 완료"
 
-# ---- PL 굽기 ----
+# ---- PL 굽기 : 이 명령만 FPGA 타깃을 요구한다 ----
+targets -set -nocase -filter {name =~ "xc7z020"}
 fpga -file $BIT
 puts "\[*\] 비트스트림 다운로드 완료"
-after 200
+after 500
+
+# ---- 레지스터 접근은 다시 ARM 타깃으로 ----
+targets -set -nocase -filter {name =~ "*Cortex-A9*#0*"}
 
 # ---- 읽기 ----
 proc rd {addr} { return [lindex [mrd -force $addr] 1] }

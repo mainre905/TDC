@@ -16,8 +16,16 @@
 #    이 Vivado 설치본에 ZedBoard 보드 파일이 없다 (get_board_parts *zed* 결과 없음).
 #    그래서 apply_board_preset 대신 아래 값을 직접 넣는다.
 #    ※ PCW_CRYSTAL_PERIPHERAL_FREQMHZ = 33.333333 은 ZedBoard 의 PS_CLK 오실레이터
-#      주파수라고 알려진 값이다. 이 값이 틀리면 PS PLL 설정이 어긋나 FCLK_CLK0 이
-#      100 MHz 가 아니게 된다. 첫 빌드에서 FCLK 주파수를 실제로 확인할 것.
+#      주파수다. 이 값이 틀리면 PS PLL 설정이 어긋나 FCLK_CLK0 이 100 MHz 가 아니게 되는데,
+#      Vivado 는 이를 검증할 방법이 없어 합성·타이밍·비트스트림이 전부 통과한다.
+#      즉 틀려도 조용히 틀린다.
+#      ★ 2026-09-05 확인 완료 — 이 값을 다시 의심하지 말 것. 근거 두 가지:
+#        (1) 문서 : ZedBoard 매뉴얼에 PS_CLK 33.3333 MHz 로 명기 (사용자 확인)
+#        (2) 실측 : tcl/xsct_stage1_check.tcl 로 STATUS[0] MMCM locked = 1 을 읽음.
+#            clk_wiz_0 는 PRIM_IN_FREQ 100.000 전제로 배수가 고정돼 있으므로,
+#            lock 이 걸렸다는 것은 FCLK_CLK0 이 100 MHz 근방으로 나온다는 뜻이다.
+#        단, MMCM lock 허용 범위는 넓다. 이 두 근거는 "발진기가 33.333 MHz 계열이 맞다"
+#        까지를 보장하며, 클럭 주기가 정확히 5000.0 ps 라는 뜻은 아니다.
 #    ※ DDR / MIO 는 기본값 그대로 둔다. 1단계 검증은 XSCT 가 JTAG DAP 로
 #      GP0 를 직접 두드리는 것이라 DDR 도 콘솔도 필요 없다.
 #

@@ -262,6 +262,19 @@ if {$DO_BUILD} {
         puts "\[검증\] hit 네트 fanout = [get_property FLAT_PIN_COUNT [lindex $hitnet 0]]"
     }
 
+    # ★ 2026-09-05 : 구현 전략을 기본값에서 Performance_ExplorePostRoutePhysOpt 로 바꾼다.
+    #   [무엇이 문제였나] PS7 + AXI 를 넣은 뒤 기본 전략으로는 hold 가 깨진다.
+    #     WHS = -0.045 ns, 위반 경로 captured_c0_stg2 -> stg3 (같은 clk_200_fixed 도메인).
+    #     원인은 지연이 아니라 스큐다 : 캐리체인 pblock 을 384탭 때문에 Y140 까지 넓히면서
+    #     체인 양끝의 클럭 도착 시각 차이(스큐 0.298 ns)가 데이터 지연(0.266 ns)을 넘어섰다.
+    #   [왜 이 전략인가] 이 전략은 route 뒤에 post_route_phys_opt_design 단계를 켠다
+    #     (EnableStepBool=1). 라우팅이 끝난 실제 지연을 보고 레지스터를 재배치·복제해
+    #     스큐를 줄이므로, 배치 단계의 추정치로만 판단하는 기본 전략이 못 잡는 hold 를 잡는다.
+    #   [결과] 2026-09-05 zed_axi 빌드 : WNS +0.089 / WHS +0.034 ns, 비트스트림 정상 생성.
+    #   [대가] 구현 시간이 늘어난다(단계가 하나 더 붙는다). 타이밍이 필수라 감수한다.
+    set_property strategy Performance_ExplorePostRoutePhysOpt [get_runs impl_1]
+    puts "\[*\] 구현 전략 : [get_property strategy [get_runs impl_1]]"
+
     puts "\[*\] 구현 + 비트스트림 시작..."
     launch_runs impl_1 -to_step write_bitstream -jobs 8
     wait_on_run impl_1
@@ -272,9 +285,17 @@ if {$DO_BUILD} {
     puts ""
     puts "=========================================================="
     puts " \[타이밍\]  WNS = $wns ns    WHS = $whs ns"
-    if {$wns < 0 || $whs < 0} {
-        puts " ★ 음수다 — popcount 트리에 파이프라인 단을 추가해야 한다."
-    } else {
+    # ★ 2026-09-05 : setup 과 hold 는 처방이 다르다. 예전엔 둘 다 "파이프라인 추가"로
+    #   안내했는데, hold 위반에 파이프라인을 넣으면 오히려 악화된다(경로가 더 짧아진다).
+    if {$wns < 0} {
+        puts " ★ WNS 음수 (setup) — 경로가 5 ns 안에 못 들어온다."
+        puts "    popcount 트리에 파이프라인 단을 추가하거나, 비교 로직을 뒤 단으로 옮긴다."
+    }
+    if {$whs < 0} {
+        puts " ★ WHS 음수 (hold) — 데이터가 클럭보다 먼저 도착한다. 스큐 문제다."
+        puts "    구현 전략이 Performance_ExplorePostRoutePhysOpt 인지 먼저 확인할 것."
+    }
+    if {$wns >= 0 && $whs >= 0} {
         puts " OK — 타이밍 통과"
     }
     puts "=========================================================="
@@ -295,9 +316,12 @@ puts "   2) open_run synth_1 ; 아래 확인:"
 puts "        puts \"carry4=\[llength \[get_cells -hier -filter {NAME =~ *u_carry4*}\]\]\"    ;# $CHAIN_STAGES"
 puts "        puts \"taps  =\[llength \[get_cells -hier -filter {NAME =~ *taps_sampled_d1_reg*}\]\]\" ;# $NUM_TAPS"
 puts "        puts \"hit fanout=\[get_property FLAT_PIN_COUNT \[get_nets -hier -filter {NAME =~ *tdc_hit_in*}\]\]\"  ;# 1 이어야 함"
-puts "   3) launch_runs impl_1 -to_step write_bitstream -jobs 8 ; wait_on_run impl_1"
+puts "   3) set_property strategy Performance_ExplorePostRoutePhysOpt \[get_runs impl_1\]"
+puts "        ★ 2026-09-05 : 기본 전략이면 hold 가 깨진다 (WHS -0.045 ns). 반드시 먼저 걸 것."
+puts "      launch_runs impl_1 -to_step write_bitstream -jobs 8 ; wait_on_run impl_1"
 puts "   4) open_run impl_1 ; report_timing_summary -delay_type min_max"
-puts "        WNS / WHS 가 음수면 알릴 것 (popcount 트리 파이프라인 추가로 해결)"
+puts "        WNS 음수 = setup, popcount 파이프라인 추가로 해결"
+puts "        WHS 음수 = hold(스큐), 위 전략이 걸렸는지 확인 — 파이프라인은 역효과"
 puts ""
 puts " 하드웨어 확인 (J18 점퍼): FMC 뱅크 VCCO 를 2.5V 로 둘 것 (LVDS_25 + DIFF_TERM)"
 puts "=========================================================="
