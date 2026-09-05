@@ -6,13 +6,27 @@ module tdc_histogram #(
 )(
     input wire clk,
     input wire rst_n,
-    
+
     // TDC 입력 인터페이스 (Port A 누적용)
     input wire [ADDR_WIDTH-1:0] ts_fine_idx,
     input wire                  ts_valid,
-    
-    // 스캐너 인터페이스 (Port B 일괄 읽기용)
-    input wire [ADDR_WIDTH-1:0] read_addr,
+
+    // ★ 2026-09-05 추가 : 히스토그램 지우기 (AXI CTRL.HISTO_CLR)
+    //   레벨 신호다. 1 인 동안 CLEAR 상태에 머물며 주소를 순회하면서 0 을 쓴다.
+    //   왜 펄스가 아니라 레벨인가 : 펄스를 쓰면 클럭 도메인이 다른 소프트웨어가
+    //   그 한 사이클을 놓칠 수 있다. 레벨이면 "512 사이클(2.6 us) 넘게 들고
+    //   있다가 내린다"는 것만 지키면 반드시 전부 지워진다.
+    //   이 신호는 tdc_axi_regs 가 이미 tdc_clk 도메인으로 래치해서 준다.
+    input wire                  histo_clr,
+
+    // ★ 2026-09-05 변경 : Port B 는 이제 ILA 스캐너가 아니라 AXI 가 읽는다.
+    //   clk_b 로 별도 클럭을 받는다 — 듀얼포트 BRAM 은 포트마다 클럭이 달라도
+    //   되게 만들어진 물건이고, Port B 를 AXI 클럭으로 돌리면 AXI 쪽에서는
+    //   전부 동기 논리가 되어 클럭 도메인 교차 처리가 아예 필요 없어진다.
+    //   누적(Port A)이 도는 중에 읽어도 BRAM 포트 읽기는 워드 단위로 원자적이라
+    //   32비트 값이 찢어지지 않는다. 옛값이냐 새값이냐만 갈릴 뿐이다.
+    input wire                   clk_b,
+    input wire [ADDR_WIDTH-1:0]  read_addr,
     output wire [DATA_WIDTH-1:0] read_data
 );
 
@@ -50,6 +64,16 @@ module tdc_histogram #(
             active_addr <= 0;
             count_reg <= 0;
             count_raw <= 0;
+        end else if (histo_clr) begin
+            // ★ 2026-09-05 : 지우기 요청이 걸려 있는 동안 CLEAR 에 머문다.
+            //   진입할 때만 주소를 0 으로 놓고, 머무는 동안은 계속 증가시킨다
+            //   (9비트라 511 다음은 저절로 0 으로 돌아간다).
+            //   요청이 내려가면 아래 case 의 STATE_CLEAR 가 511 까지 마저 돌고
+            //   IDLE 로 빠진다. CLEAR 중에는 ts_valid 를 보지 않으므로 그 사이
+            //   들어온 히트는 버려진다 — 지우는 중이니 그게 맞다.
+            state      <= STATE_CLEAR;
+            clear_addr <= (state == STATE_CLEAR) ? (clear_addr + 1'b1)
+                                                 : {ADDR_WIDTH{1'b0}};
         end else begin
             case (state)
                 STATE_IDLE: begin
@@ -125,12 +149,13 @@ module tdc_histogram #(
     // 3. Dual-Port BRAM 인스턴스
     // -------------------------------------------------------------------------
     tdc_bram_512x32 u_bram (
-        .clk     (clk),
+        .clk_a   (clk),
         .addr_a  (ram_addr_a),
         .we_a    (ram_we_a),
         .din_a   (ram_din_a),
         .dout_a  (ram_dout_a),
-        
+
+        .clk_b   (clk_b),          // ★ 2026-09-05 : Port B 는 AXI 클럭
         .addr_b  (read_addr),
         .dout_b  (read_data)
     );
@@ -138,26 +163,38 @@ module tdc_histogram #(
 endmodule
 
 // Vivado Block RAM 추론 템플릿
+// ★ 2026-09-05 : 단일 클럭 -> 포트별 독립 클럭 (clk -> clk_a / clk_b).
+//   무엇이 바뀌었나 : Port B 를 ILA 스캐너(tdc_clk, 200 MHz) 대신 AXI 슬레이브
+//     (s_axi_aclk, 100 MHz)가 읽게 되었다.
+//   왜 이렇게 해도 되나 : 7-series 의 RAMB36E1 은 원래 포트마다 클럭 입력이
+//     따로 있는 진짜 듀얼포트다. 아래처럼 always 블록 두 개의 클럭을 다르게
+//     써 주면 Vivado 가 그대로 추론한다.
+//   무엇을 보장하나 / 보장하지 않나 : 한 포트의 읽기는 32비트 워드 단위로
+//     원자적이라, 반대편에서 누적(RMW)이 도는 중에 읽어도 값이 찢어지지 않는다.
+//     다만 그 순간 옛값이 나올지 새값이 나올지는 정해지지 않는다. 히스토그램
+//     카운트를 읽는 용도에서는 1 차이가 문제되지 않으므로 이 정도면 충분하다.
+//     (정확한 스냅샷이 필요하면 읽기 전에 누적을 멈추면 된다)
 module tdc_bram_512x32 (
-    input wire clk,
+    input wire clk_a,
     input wire [8:0] addr_a,
     input wire we_a,
     input wire [31:0] din_a,
     output reg [31:0] dout_a,
-    
+
+    input wire clk_b,
     input wire [8:0] addr_b,
     output reg [31:0] dout_b
 );
     (* ram_style = "block" *) reg [31:0] mem [0:511];
 
-    always @(posedge clk) begin
+    always @(posedge clk_a) begin
         if (we_a) begin
             mem[addr_a] <= din_a;
         end
         dout_a <= mem[addr_a];
     end
 
-    always @(posedge clk) begin
+    always @(posedge clk_b) begin
         dout_b <= mem[addr_b];
     end
 endmodule

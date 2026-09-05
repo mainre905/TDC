@@ -25,12 +25,26 @@ module tdc_test_top #(
 
     // ★ [2026-09-04 추가] AXI 레지스터 블록이 볼 TDC 도메인 신호들.
     //   tdc_axi_regs 가 이 신호들을 AXI 도메인으로 동기화해 PS 에 보여준다.
-    //   2단계에서 시퀀서가 붙으면 busy/done 도 여기로 나온다.
+    //   3단계에서 시퀀서가 붙으면 busy/done 도 여기로 나온다.
     output wire       o_tdc_clk,      // clk_200_fixed — AXI 레지스터의 TDC 도메인 클럭
     output wire       o_locked,       // MMCM lock
-    output wire [30:0] o_dna,         // 보드 식별자 (ILA probe9 와 같은 31비트)
+    output wire [30:0] o_dna,         // 보드 식별자 (31비트)
     output wire       o_dna_valid,
-    output wire       o_phase_busy    // 위상 이동 중
+    output wire       o_phase_busy,   // 위상 이동 중
+
+    // ★ [2026-09-05 추가 — AXI 2단계] 측정 조건과 위상 제어
+    output wire        o_meas_strobe, // 10 ms 게이트마다 1클럭. RO/온도 갱신 완료
+    output wire [31:0] o_ro_cnt,      // 게이트당 RO 에지 수
+    output wire [15:0] o_die_temp,    // XADC 온도 raw
+    output wire [8:0]  o_phase_cur,   // 현재 위상 스텝 (0..279)
+    input  wire [8:0]  i_phase_tgt,   // 목표 위상 — BTNU 임시 블록을 대체한다
+    input  wire        i_histo_clr,   // 히스토그램 지우기 (레벨)
+
+    // ★ [2026-09-05 추가] 히스토그램 BRAM Port B — 전부 AXI 클럭 도메인이다.
+    //   ILA 리드아웃 스캐너를 걷어내고 그 자리를 AXI 가 받는다.
+    input  wire        i_axi_clk,
+    input  wire [8:0]  i_histo_addr,
+    output wire [31:0] o_histo_data
 );
 
 
@@ -88,28 +102,21 @@ module tdc_test_top #(
     //   (기존: start_shift 한 번에 280스텝 자동 스윕 -> 변경: phase_tgt 로 이동)
     //   이유와 상세는 RTL/phase_shifter.v 상단 주석 참조.
     //
-    //   [아래 phase_tgt_reg 는 AXI 도입 전까지의 임시 구동부다]
-    //   버튼(btn_shift)을 누를 때마다 목표 위상을 한 칸 올린다. 그러면
-    //     목표 변경 -> ps_busy 상승 -> 이동 완료 -> ps_busy 하강
-    //   이 되어, 기존의 sweep_finished(ps_busy 하강 에지) -> 히스토그램 리드아웃
-    //   경로가 그대로 살아 있다. 예전엔 리드아웃 한 번 보려고 280스텝 2.8초를
-    //   기다려야 했는데, 이제는 버튼 누르면 곧바로 뜬다.
-    //
-    //   ★ AXI 레지스터가 들어오면 이 블록을 통째로 지우고 phase_tgt 를
-    //     CTRL/PHASE_TGT 레지스터에 직접 연결할 것.
+    //   ★ [2026-09-05] BTNU 임시 구동부를 걷어냈다.
+    //   무엇이 있었나 : 버튼(btn_shift)을 누를 때마다 목표 위상을 한 칸 올리는
+    //     phase_tgt_reg 블록이 있었다. 그 목적은 위상 이동이 아니라, 그로 인해
+    //     생기는 ps_busy 하강 에지로 ILA 히스토그램 리드아웃을 띄우는 것이었다.
+    //   왜 없앴나 : 히스토그램을 AXI 로 직접 읽게 되어 리드아웃 스캐너 자체가
+    //     사라졌다. 그러자 버튼도 함께 필요 없어졌다. 실제로 2026-09-05 측정에서
+    //     이 버튼을 안 눌러 빈 CSV 를 받은 일이 있었다 — 사람 손이 측정 절차에
+    //     끼어 있던 것이 문제였다.
+    //   지금은 PS 가 PHASE 레지스터(0x1C)에 목표 위상을 쓰면 그대로 이동한다.
+    //     스윕이 필요하면 PS 쪽 for 문이 한다.
     // ==========================================================
-    reg [8:0] phase_tgt_reg  = 9'd0;
-    reg       btn_shift_d1   = 1'b0;
-    always @(posedge clk_200_fixed) begin
-        btn_shift_d1 <= btn_shift;
-        if (btn_shift && !btn_shift_d1)
-            phase_tgt_reg <= (phase_tgt_reg == 9'd279) ? 9'd0 : (phase_tgt_reg + 1'b1);
-    end
-
     mmcm_phase_shifter u_ps_ctrl (
-        .clk                 (clk_200_fixed), 
-        .rst_n               (clk_locked), 
-        .phase_tgt           (phase_tgt_reg),   // ★ 2026-09-04 : start_shift 대체
+        .clk                 (clk_200_fixed),
+        .rst_n               (clk_locked),
+        .phase_tgt           (i_phase_tgt),     // ★ 2026-09-05 : AXI PHASE 레지스터
         .psen                (psen), 
         .psincdec            (psincdec), 
         .psdone              (psdone), 
@@ -326,19 +333,26 @@ module tdc_test_top #(
     );
 
     // ==========================================================
-    // 5. 온칩 ILA 리드아웃 스캐너 (350 도달 시 자동 출력)
+    // 5. ★ [2026-09-05] 리드아웃 스캐너 제거 — 히스토그램은 AXI 가 읽는다
     // ==========================================================
-    reg        readout_active;
-    reg [8:0]  sweep_addr;
-    reg [8:0]  probe_read_addr;
-
-    // ★ ILA 리드아웃 정렬 수정: BRAM read latency 보상용 주소 지연 레지스터
-    // 히스토그램 BRAM의 Port B는 출력이 레지스터드(dout_b <= mem[addr_b])라 read latency가 1클럭입니다.
-    //   → 사이클 N의 histo_read_data = 사이클 N-1의 read_addr가 가리킨 값
-    // ILA는 probe1(주소)과 probe2(데이터)를 같은 엣지에서 캡처하므로, 주소를 그대로 연결하면
-    // "주소 N" 옆에 "bin N-1의 카운트"가 찍혀 히스토그램 전체가 1-bin 밀립니다.
-    // 주소도 데이터와 똑같이 1클럭 지연시켜 동일 사이클에서 짝이 맞도록 정렬합니다.
-    reg [8:0]  probe_read_addr_d1;
+    //  [무엇이 있었나]
+    //  readout_active / sweep_addr / probe_read_addr / probe_read_addr_d1 로
+    //  히스토그램 BRAM 을 0..NUM_TAPS-1 까지 훑으면서 ILA 에 뿌리는 스캐너가
+    //  있었다. 시작 조건은 sweep_finished(ps_busy 하강 에지)였다.
+    //
+    //  [왜 없앴나]
+    //  (1) BRAM Port B 를 AXI 슬레이브가 직접 읽게 되어 스캐너가 필요 없다.
+    //      PS 가 0x43C0_1000 + 탭*4 를 읽으면 그 탭의 카운트가 나온다.
+    //  (2) 시작 조건이 위상 이동에 묶여 있어서, 위상 스윕이 없는 Mode 1 에서는
+    //      사람이 BTNU 를 눌러 억지로 ps_busy 를 만들어야 했다. 그 절차가
+    //      문서에 없어 2026-09-05 측정에서 빈 CSV 를 받았다.
+    //  (3) BRAM 읽기 지연 1클럭 보상(probe_read_addr_d1)도 함께 없어졌다.
+    //      같은 보상이 이제 tdc_axi_regs 의 hpend 시프트 레지스터에 있다 —
+    //      같은 함정이므로 그쪽 주석을 참조할 것.
+    //
+    //  아래 ps_busy 3단 동기화는 남긴다. Mode 0 의 히스토그램 게이팅
+    //  (gated_ts_valid)이 ps_busy_sync_d2 를 쓰기 때문이다.
+    // ==========================================================
 
     // ★ CDC 및 조기 트리거 수정 1: 이종 클럭(fixed -> shifted) 간 안전한 ps_busy 동기화를 위한 3단 FF 구현
     reg ps_busy_sync_d1;
@@ -354,37 +368,6 @@ module tdc_test_top #(
             ps_busy_sync_d1 <= ps_busy;
             ps_busy_sync_d2 <= ps_busy_sync_d1; // 메타스테빌리티 방지 보장
             ps_busy_sync_d3 <= ps_busy_sync_d2; // 하강 에지 구분을 위해 1클럭 더 지연
-        end
-    end
-
-    // ★ CDC 및 조기 트리거 수정 2: 
-    // 다중 비트 loop_cnt 비교 대신, 280단계 대기가 끝나고 ps_busy가 1에서 0으로 떨어지는 순간(하강 에지)을 
-    // 검출하여 대기 시간이 완전히 충족된 최종 시점에 정확히 readout을 가동시킵니다.
-    wire sweep_finished = (!ps_busy_sync_d2 && ps_busy_sync_d3);
-
-    always @(posedge tdc_clk or negedge clk_locked) begin
-        if (!clk_locked) begin
-            readout_active     <= 1'b0;
-            sweep_addr         <= 9'd0;
-            probe_read_addr    <= 9'd0;
-            probe_read_addr_d1 <= 9'd0;
-        end else begin
-            if (sweep_finished && !readout_active) begin
-                readout_active <= 1'b1;
-                sweep_addr     <= 9'd0;
-            end else if (readout_active) begin
-                // ★ [2026-09-03] 320탭 고정 -> NUM_TAPS 유도.
-                //   80단이면 319, 112단이면 447 에서 스캔이 끝난다.
-                //   이 값을 안 고치면 448탭 빌드에서 뒤쪽 128칸이 영영 안 읽혀,
-                //   유효탭 상한을 히스토그램에서 읽어낸다는 이번 확장의 목적 자체가 무산된다.
-                if (sweep_addr == (NUM_TAPS - 1)) begin
-                    readout_active <= 1'b0;
-                end else begin
-                    sweep_addr <= sweep_addr + 1'b1;
-                end
-            end
-            probe_read_addr    <= sweep_addr;      // BRAM Port B로 나가는 실제 읽기 주소
-            probe_read_addr_d1 <= probe_read_addr; // ★ BRAM 1클럭 지연분 보상 → ILA에서 histo_read_data와 동일 사이클
         end
     end
 
@@ -404,8 +387,10 @@ module tdc_test_top #(
         end
     endgenerate
 
-    wire [31:0] histo_read_data;
-
+    // ★ 2026-09-05 : Port B 가 AXI 로 넘어갔다.
+    //   read_addr/read_data 가 i_axi_clk 도메인이라 이 모듈 안에서는 쓰지 않고
+    //   최상위 포트로 그대로 통과시킨다. 히스토그램 지우기(i_histo_clr)는
+    //   tdc_axi_regs 가 이미 tdc_clk 도메인으로 래치해서 준 레벨 신호다.
     tdc_histogram #(
         .ADDR_WIDTH(9),
         .DATA_WIDTH(32)
@@ -413,13 +398,16 @@ module tdc_test_top #(
         .clk         (tdc_clk),
         .rst_n       (clk_locked),
         .ts_fine_idx (aligned_fine_idx),
-        .ts_valid    (gated_ts_valid),   
-        .read_addr   (probe_read_addr),
-        .read_data   (histo_read_data)
+        .ts_valid    (gated_ts_valid),
+        .histo_clr   (i_histo_clr),
+        .clk_b       (i_axi_clk),
+        .read_addr   (i_histo_addr),
+        .read_data   (o_histo_data)
     );
 
-    assign led[0] = clk_locked; 
-    assign led[1] = readout_active; 
+    assign led[0] = clk_locked;
+    // ★ 2026-09-05 : readout_active 가 없어져 위상 이동 표시로 바꾼다.
+    assign led[1] = ps_busy;
     // ★ Entry transient 수정: 과거 led[2]에 tdc_hit_in을 연결했으나 제거함.
     //   hit 네트가 딜레이라인 CYINIT과 LED 패드(G14)를 동시에 구동하면서
     //   배선 부하로 에지 slew가 저하되고, 그 결과 CARRY4 초입에 entry transient 발생.
@@ -430,168 +418,32 @@ module tdc_test_top #(
     assign led[3] = final_ts_valid; 
 
     // ==========================================================
-    // 7. ILA (Integrated Logic Analyzer)
+    // 7. ★ [2026-09-05] ILA 제거 — 데이터는 전부 AXI 로 나간다
     // ==========================================================
-    // [현재 모드] 캘리브레이션 검증용 timestamp 캡처
-    //   목적: COE 적용 전(선형 COE)/후(code-density COE)를 '동일한 ILA·동일한 분석'으로 비교.
-    //         측정값 = final_timestamp_ps, 참 시간 기준 = current_loop_cnt(위상 스텝).
-    //   분석: fine = (-timestamp) mod 5000  →  fine vs loop_cnt 선형성(DNL/INL).
-    //   ★ ila_0 IP를 재구성할 것: probe2 폭 32 → 48비트 (final_timestamp_ps[47:0] 수용).
-    //     나머지 probe 폭(1/9/9/9)은 그대로.
-    // (1) MMCM 스텝(loop_cnt) 변경 감지 및 단발성 트리거 생성 로직
+    //  [무엇이 있었나]
+    //  ila_0(universal_ila) 인스턴스와, 그 캡처 조건을 만들던 로직
+    //  (toggle_sync_d1..d3 / step_changed_pulse / cap_cnt /
+    //   current_loop_cnt_stable / capture_trigger)이 있었다. 프로브 10개로
+    //  타임스탬프·히스토그램·RO 주파수·온도·DNA 를 한꺼번에 뽑았다.
     //
-    // ==========================================================
-    // ★ [2026-08-19 CDC 1단 동기화 수정] 
-    // 기존의 멀티비트 current_loop_cnt 직접 비교 조건(current_loop_cnt != prev_loop_cnt)은
-    // 이종 클럭(clk_200_fixed -> tdc_clk) 간 비동기 샘플링 및 버스 스큐 문제로 인해 
-    // 메타스테빌리티 및 유령 값 인식으로 loop_cnt 결손/중복 트리거를 유발했습니다.
-    // 이에 mmcm_phase_shifter에서 생성된 1비트 loop_updated_toggle 신호를
-    // FF로 동기화하여 스텝당 단 1회의 capture_trigger만 안전하게 생성합니다.
+    //  [왜 없앴나]
+    //  (1) 히스토그램은 이제 AXI 로 읽는다(0x43C0_1000 + 탭*4).
+    //      RO 카운트·온도·DNA 도 레지스터로 나간다(0x14 / 0x18 / 0x10).
+    //      즉 ILA 로만 볼 수 있던 것이 남지 않았다.
+    //  (2) ILA 를 쓰려면 Vivado Hardware Manager 를 띄우고 사람이 버튼을
+    //      눌러야 했다. Vitis 에서 레지스터만으로 측정을 끝내는 것이 목표다.
+    //  (3) 2026-09-04 빌드에서 타이밍 임계경로가 ILA IP 안에 있었다.
+    //      빼면 그만큼 여유가 늘어난다. (실제 효과는 이번 빌드에서 확인할 것)
     //
-    // ★ [2026-08-20 수정 ①] 동기화기를 1단 -> 2단으로.
-    //   무엇이 문제였나 : toggle_sync_d1 이 비동기 신호를 직접 받는데, 그 값이 곧바로
-    //     XOR 에 들어가고 있었다. d1 이 메타스테이블이면 그대로 펄스로 전파된다.
-    //     d2 는 메타스테이빌리티 해소용이 아니라 에지 검출용 지연이었다.
-    //   같은 파일의 다른 두 CDC 경로는 이미 제대로 돼 있다 —
-    //     ps_busy : d1,d2 동기화 + d3 에지검출 (3단)
-    //     RO      : ro_sync_d1, ro_sync_d2 둘 다 ASYNC_REG
-    //   이 경로만 한 단 부족했다. d1·d2 를 동기화 2단으로 쓰고 d3 를 에지검출로 분리한다.
-    //   d1,d2 둘 다 ASYNC_REG 여야 배치기가 두 FF 을 밀착시켜 해소 시간을 확보한다.
-    //   비용 : FF 1개, 지연 1클럭(5 ns). 스텝 체류가 10 ms 이므로 무의미하다.
-    //   주의 : 2026-08-20 실측(6캡처 x 280스텝)에서 결손·중복은 0 이었다. 관측된
-    //          고장을 고치는 것이 아니라 여유를 확보하는 예방적 수정이다.
-    // ==========================================================
-
-    (* ASYNC_REG = "TRUE" *) reg toggle_sync_d1 = 1'b0; // 동기화 1단 (비동기 입력)
-    (* ASYNC_REG = "TRUE" *) reg toggle_sync_d2 = 1'b0; // 동기화 2단 ★2026-08-20 추가
-    reg                      toggle_sync_d3 = 1'b0;     // 에지 검출용 1클럭 지연
-
-    always @(posedge tdc_clk or negedge clk_locked) begin
-        if (!clk_locked) begin
-            toggle_sync_d1 <= 1'b0;
-            toggle_sync_d2 <= 1'b0;
-            toggle_sync_d3 <= 1'b0;
-        end else begin
-            toggle_sync_d1 <= loop_updated_toggle; // CDC 1단
-            toggle_sync_d2 <= toggle_sync_d1;      // CDC 2단 (메타스테빌리티 해소)
-            toggle_sync_d3 <= toggle_sync_d2;      // 에지 검출용
-        end
-    end
-
-    // 스텝 변경 에지 검출 펄스 — 해소가 끝난 d2/d3 로 만든다
-    wire step_changed_pulse = (toggle_sync_d2 ^ toggle_sync_d3);
-
-    // ==========================================================
-    // ★ [2026-08-20 수정 ②] 스텝당 1샘플 -> CAP_PER_STEP 샘플
+    //  [무엇이 함께 사라졌나 — 3단계에서 되살릴 것]
+    //  개별 히트의 타임스탬프를 모으는 경로가 지금은 없다. capture_trigger 가
+    //  하던 "위상 스텝이 바뀌면 CAP_PER_STEP 발만 캡처" 로직은 3단계의
+    //  캡처 버퍼 + 시퀀서 FSM 으로 옮긴다. 그때까지 Mode 0(DPS)과 Mode 2(EXT)의
+    //  타임스탬프는 읽을 수 없다 — 2단계는 Mode 1(코드밀도)만 완성시킨다.
     //
-    //   무엇이 문제였나 : 위상 스텝 하나에 히트가 20만 개(10 ms / 50 ns) 지나가는데
-    //     capture_arm 이 첫 히트에서 바로 해제되어 ILA 에 1개만 저장됐다. 그 1개는
-    //     양자화된 값이라 반드시 어느 탭 하나의 값으로만 나온다.
-    //
-    //   실측 근거 (2026-08-20, python/test_20260820/) :
-    //     반복 3회 캡처로 잰 점당 측정 잡음  sigma_n = 7.79 ps (before) / 7.89 ps (after)
-    //     이 값은 히스토그램에서 유도한 양자화 한계 8.20 ps 와 일치한다.
-    //       8.20 = sqrt( sum(w[i]^2 * p[i]) / 12 ),  w=탭 폭, p=h[i]/H
-    //     DNL 은 이웃 점의 차이라 잡음이 sqrt(2) 배 :
-    //       0.62 LSB = sqrt(2) x 7.79 / 17.857     <- 측정된 DNL rms 1.10 LSB 의 절반
-    //       실제 DNL rms = sqrt(1.10^2 - 0.62^2) = 0.91 LSB
-    //     즉 DNL 측정값의 절반 가까이가 측정 잡음이었다.
-    //
-    //   왜 여러 번 재면 나아지나 : 한 번 재면 탭 값밖에 못 얻지만, 여러 번 재서 평균하면
-    //     탭 사이를 읽어낸다. 실제로 jitter_100.csv 에서 820 히트의 평균이 277.81 ps 로
-    //     나왔는데 이는 탭 272 와 282 사이의 값이다 (어느 탭에도 없는 값).
-    //     K 개를 평균하면 잡음이 sqrt(K) 배 줄어든다.
-    //
-    //   K 선택 : ILA depth 8192 가 상한이다 (XC7Z010 BRAM 60개 x 36Kb = 2,211,840 비트,
-    //     probe9 추가 후 프로브 폭 합계 181 비트 -> depth 16384 는 2,965,504 비트로 초과).
-    //     280 스텝 x K <= 8192  ->  K <= 29.
-    //       K=16 : 4,480 샘플 (55 %), 점당 1.95 ps, DNL 잡음 0.15 LSB
-    //       K=24 : 6,720 샘플 (82 %), 점당 1.59 ps, DNL 잡음 0.13 LSB
-    //     여유를 두어 16 을 기본으로 한다. 필요하면 이 값만 바꾸면 된다.
-    //     ※ 실제 BRAM 사용량은 ILA IP GUI 또는 report_utilization 으로 확인할 것.
-    //
-    //   주의 : 이것은 TDC 성능을 올리는 수정이 아니라 TDC 를 더 정확히 재기 위한
-    //          측정 방법 수정이다. 탭 폭도 지터도 바뀌지 않는다.
-    //
-    //   분석 : 파이썬에서 같은 current_loop_cnt_stable 끼리 묶어 평균낼 것.
-    //          df.groupby('current_loop_cnt_stable')['fine'].mean()
-    // ==========================================================
-    localparam [4:0] CAP_PER_STEP = 5'd16;   // 스텝당 저장할 히트 수 (1~29)
-
-    reg [8:0] current_loop_cnt_stable = 9'd0;
-    reg [4:0] cap_cnt                 = 5'd0; // ★2026-08-20 : capture_arm(1비트) 대체
-
-    always @(posedge tdc_clk or negedge clk_locked) begin
-        if (!clk_locked) begin
-            cap_cnt                 <= 5'd0;
-            current_loop_cnt_stable <= 9'd0;
-        end else begin
-            // 스텝이 바뀌는 순간 CAP_PER_STEP 발 장전 + 스텝 안정값 래치
-            if (step_changed_pulse) begin
-                cap_cnt                 <= CAP_PER_STEP;
-                current_loop_cnt_stable <= current_loop_cnt;
-            end
-            // 유효 데이터가 나올 때마다 1발씩 소모. 0 이 되면 그 스텝의 캡처 종료
-            else if (cap_cnt != 5'd0 && final_ts_valid) begin
-                cap_cnt <= cap_cnt - 1'b1;
-            end
-        end
-    end
-
-    wire capture_trigger = (cap_cnt != 5'd0) && final_ts_valid;
-
-   //ila_0 your_ila_instance (
-     //   .clk    (tdc_clk),
-     //   .probe0 (capture_trigger),           // [0:0]  캡처 조건 플래그
-     //   .probe1 (current_loop_cnt),          // [8:0]  X축: 기준 위상 스텝 (0 ~ 279)
-     //   .probe2 (final_timestamp_ps[47:0]),  // [47:0] Y축: TDC가 계산한 절대 시간
-     //   .probe3 (aligned_fine_idx)           // [8:0]  참고용: 캡처된 Raw Tap 번호
-   // );
-     
-     // (2) 통합 ILA 인스턴스 (Depth는 1024 ~ 4096 정도로 넉넉히 설정)
-    ila_0 universal_ila (
-        .clk    (tdc_clk),
-        
-        // --- [INL 측정용 프로브 그룹] ---
-        .probe0 (capture_trigger),           // [0:0]  INL 캡처 조건 (1일 때 캡처)
-        .probe2 (current_loop_cnt_stable),   // [8:0]  ★ [2026-08-19 수정] 동기화된 안전 스텝 번호
-        .probe3 (final_timestamp_ps[47:0]),  // [47:0] INL Y축: 절대 시간
-        
-        // --- [COE 추출을 위한 히스토그램 프로브 그룹 CODE DENSITY TEST] ---
-        .probe1 (readout_active),            // [0:0]  히스토그램 캡처 조건 (1일 때 캡처)
-        .probe4 (probe_read_addr_d1),        // [8:0]  히스토그램 X축: Tap 인덱스 (0~NUM_TAPS-1, 112단이면 0~447)
-        .probe5 (histo_read_data),           // [31:0] 히스토그램 Y축: 누적 카운트 값
-
-        // --- [RO 주파수/온도 특성화 그룹] 2026-07-24 추가 ---
-        //   probe7을 storage qualification 조건으로 걸어야 게이트당 1샘플만
-        //   저장되어 depth 1024 = 10.24초 이력이 된다. (basic 캡처로 뽑으면
-        //   같은 값이 1024번 중복될 뿐 변동을 볼 수 없음)
-        .probe6 (ro_meas_cnt),               // [31:0] 게이트(10ms)당 RO 에지 수
-        .probe7 (meas_strobe),               // [0:0]  자격저장/트리거 조건
-        .probe8 (die_temp_at_meas),          // [15:0] XADC 다이 온도 (raw)
-
-        // --- [보드 식별] 2026-08-20 추가 ---
-        //   ★ ila_0 IP 를 재구성할 것: probe 수 9 -> 10, probe9 폭 32비트.
-        //     기존 probe0~8 의 폭은 그대로 두면 된다.
-        //   구성 : {dna_valid, device_dna[30:0]}
-        //     최상위 1비트가 0이면 아직 읽는 중이거나 실패한 것이니 그 캡처의
-        //     보드 식별값은 믿지 말 것. 정상이면 리셋 후 수 us 안에 1이 된다.
-        //     31비트만 뽑아도 보드 2대를 구분하기에는 충분하다.
-        .probe9 ({device_dna_valid, device_dna[30:0]})   // [31:0] 보드 식별자
-    );
-  
-
-
-    // [보존] 히스토그램(code density) 캡처용 - COE 생성 시 이 설정으로 되돌릴 것.
-    //        되돌릴 때 ila_0 IP의 probe2 폭도 48 → 32로 다시 바꿔야 함.
-    // ila_0 your_ila_instance (
-    //     .clk    (tdc_clk),
-    //     .probe0 (readout_active),       // [0:0]
-    //     .probe1 (probe_read_addr_d1),   // [8:0] X축: Tap 번호 (histo_read_data와 정렬됨)
-    //     .probe2 (histo_read_data),      // [31:0] Y축: 카운트 값
-    //     .probe3 (current_loop_cnt),     // [8:0]
-    //     .probe4 (aligned_fine_idx)      // [8:0]
-    // );
+    //  [ila_0 IP 자체]
+    //  build_zedboard.tcl 의 IP 생성 목록에서도 뺐다. 다시 넣으려면 그 목록과
+    //  이 자리 양쪽을 되살려야 한다.
 
     // ★ [2026-09-04] AXI 레지스터 블록으로 내보내는 TDC 도메인 신호
     assign o_tdc_clk    = clk_200_fixed;
@@ -599,5 +451,18 @@ module tdc_test_top #(
     assign o_dna        = device_dna[30:0];
     assign o_dna_valid  = device_dna_valid;
     assign o_phase_busy = ps_busy;
+
+    // ★ [2026-09-05 추가] ILA 로만 보던 값들을 레지스터로 내보낸다.
+    //   o_meas_strobe 는 tdc_axi_regs 가 다중 비트 CDC 용 토글을 만드는 데 쓴다.
+    //   ILA 시절에는 이 신호가 '자격저장 조건'이었다 — 같은 신호의 역할만 바뀐 셈이다.
+    assign o_meas_strobe = meas_strobe;
+    assign o_ro_cnt      = ro_meas_cnt;
+    assign o_die_temp    = die_temp_at_meas;
+    assign o_phase_cur   = current_loop_cnt;
+
+    // ★ [2026-09-05] btn_shift 는 이제 쓰지 않는다.
+    //   포트와 XDC 제약(T18)은 남겨 둔다. 3단계 시퀀서에서 "측정 시작" 같은
+    //   수동 트리거로 다시 쓸 여지가 있고, 지우면 XDC 도 함께 고쳐야 한다.
+    //   합성에서 "unused port" 경고가 뜨는 것은 정상이다.
 
 endmodule

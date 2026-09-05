@@ -189,38 +189,64 @@ module tdc_zedboard_top #(
     wire        tdc_dna_valid;
     wire        tdc_phase_busy;
 
+    // ★ 2026-09-05 : AXI 2단계 — 히스토그램 읽기 창과 측정 조건 신호
+    wire        tdc_meas_strobe;
+    wire [31:0] tdc_ro_cnt;
+    wire [15:0] tdc_die_temp;
+    wire [8:0]  tdc_phase_cur;
+    wire [8:0]  ctrl_phase_tgt;
+    wire [8:0]  histo_addr;
+    wire [31:0] histo_data;
+
+    // ★ 2026-09-05 : ctrl_histo_clr 를 아래 u_core 인스턴스가 먼저 쓰므로
+    //   선언이 여기 있어야 한다 (Verilog 는 암시적 선언을 1비트로 만들어 버린다).
+    wire [1:0] ctrl_hit_src;
+    wire       ctrl_start, ctrl_stop, ctrl_histo_clr, ctrl_tdc_rst, ctrl_cap_fmt;
+
     tdc_test_top #(
         .OPERATION_MODE (OPERATION_MODE),
         .CARRY4_STAGES  (96)              // 384탭. 근거는 tdc_fmcw_core_co.v 상단 주석
     ) u_core (
         .clk_125      (fclk),             // ★ 2026-09-04 : Y9 발진기 -> PS FCLK_CLK0
         .rst_n        (mmcm_rst),
-        .btn_shift    (btn_shift),
+        .btn_shift    (btn_shift),        // ★ 2026-09-05 : 코어 내부에서 미사용 (주석 참조)
         .ext_hit_in   (hit_from_fmc),
         .led          (led),
         .o_tdc_clk    (tdc_clk),
         .o_locked     (tdc_locked),
         .o_dna        (tdc_dna),
         .o_dna_valid  (tdc_dna_valid),
-        .o_phase_busy (tdc_phase_busy)
+        .o_phase_busy (tdc_phase_busy),
+
+        // ★ 2026-09-05 추가
+        .o_meas_strobe (tdc_meas_strobe),
+        .o_ro_cnt      (tdc_ro_cnt),
+        .o_die_temp    (tdc_die_temp),
+        .o_phase_cur   (tdc_phase_cur),
+        .i_phase_tgt   (ctrl_phase_tgt),
+        .i_histo_clr   (ctrl_histo_clr),
+        // 히스토그램 BRAM Port B 는 AXI 클럭(fclk)으로 돈다
+        .i_axi_clk     (fclk),
+        .i_histo_addr  (histo_addr),
+        .o_histo_data  (histo_data)
     );
 
     // =========================================================================
     // AXI 제어/상태 레지스터
-    //   1단계라 ID / BUILD / CTRL / STATUS / DNA 만 있다.
-    //   ctrl_* 출력은 아직 아무 데도 안 쓴다 — 2단계에서 시퀀서가 받는다.
+    //   ★ 2026-09-05 (2단계) : 히스토그램 리드백 + RO_CNT/DIE_TEMP/PHASE 추가.
+    //     주소 폭이 8 -> 16 으로 늘었다. 히스토그램 창이 0x1000 부터라
+    //     주소 비트 12 가 필요하고, 8비트로는 0x1000 이 0x00 으로 접혀
+    //     ID 레지스터와 충돌한다.
+    //     ctrl_start/stop/tdc_rst/cap_fmt 는 아직 안 쓴다 — 3단계 시퀀서가 받는다.
     //   PS 에서 0x43C0_0000 을 읽어 0x54444302 가 나오면 성공.
     // =========================================================================
-    wire [1:0] ctrl_hit_src;
-    wire       ctrl_start, ctrl_stop, ctrl_histo_clr, ctrl_tdc_rst, ctrl_cap_fmt;
-
     tdc_axi_regs #(
-        .C_S_AXI_ADDR_WIDTH (8),
+        .C_S_AXI_ADDR_WIDTH (16),            // ★ 2026-09-05 : 8 -> 16
         .CHAIN_STAGES       (96)
     ) u_regs (
         .s_axi_aclk      (fclk),
         .s_axi_aresetn   (arstn[0]),
-        .s_axi_awaddr    (axi_awaddr[7:0]),   // 64K 어퍼처 안에서 하위 8비트만 디코딩
+        .s_axi_awaddr    (axi_awaddr[15:0]),  // ★ 2026-09-05 : 64K 어퍼처 전체
         .s_axi_awvalid   (axi_awvalid),
         .s_axi_awready   (axi_awready),
         .s_axi_wdata     (axi_wdata),
@@ -230,7 +256,7 @@ module tdc_zedboard_top #(
         .s_axi_bresp     (axi_bresp),
         .s_axi_bvalid    (axi_bvalid),
         .s_axi_bready    (axi_bready),
-        .s_axi_araddr    (axi_araddr[7:0]),
+        .s_axi_araddr    (axi_araddr[15:0]),  // ★ 2026-09-05 : 8 -> 16비트
         .s_axi_arvalid   (axi_arvalid),
         .s_axi_arready   (axi_arready),
         .s_axi_rdata     (axi_rdata),
@@ -244,16 +270,25 @@ module tdc_zedboard_top #(
         .stat_mmcm_locked(tdc_locked),
         .stat_dna        (tdc_dna),
         .stat_dna_valid  (tdc_dna_valid),
-        .stat_busy       (1'b0),              // 2단계 시퀀서에서 연결
-        .stat_done       (1'b0),              // 2단계 시퀀서에서 연결
+        .stat_busy       (1'b0),              // 3단계 시퀀서에서 연결
+        .stat_done       (1'b0),              // 3단계 시퀀서에서 연결
         .stat_phase_busy (tdc_phase_busy),
+
+        // ★ 2026-09-05 추가
+        .stat_meas_strobe(tdc_meas_strobe),
+        .stat_ro_cnt     (tdc_ro_cnt),
+        .stat_die_temp   (tdc_die_temp),
+        .stat_phase_cur  (tdc_phase_cur),
+        .histo_addr      (histo_addr),
+        .histo_data      (histo_data),
 
         .ctrl_hit_src    (ctrl_hit_src),
         .ctrl_start      (ctrl_start),
         .ctrl_stop       (ctrl_stop),
         .ctrl_histo_clr  (ctrl_histo_clr),
         .ctrl_tdc_rst    (ctrl_tdc_rst),
-        .ctrl_cap_fmt    (ctrl_cap_fmt)
+        .ctrl_cap_fmt    (ctrl_cap_fmt),
+        .ctrl_phase_tgt  (ctrl_phase_tgt)     // ★ 2026-09-05 : BTNU 대체
     );
 
 endmodule

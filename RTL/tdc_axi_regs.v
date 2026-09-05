@@ -5,15 +5,27 @@
 //
 //  [무엇인가]
 //  PS(ARM)가 AXI4-Lite 로 TDC 를 제어하고 상태를 읽는 창구다.
-//  대용량 메모리(교정표/히스토그램/캡처버퍼)는 여기 없다 — 그건 Xilinx
-//  AXI BRAM Controller IP 가 따로 맡는다. 이 모듈은 스칼라 레지스터만 다룬다.
-//  그래야 우리가 직접 짜는 AXI 로직이 최소로 유지된다.
 //
-//  [1단계 범위]
-//  ID / BUILD / CTRL / STATUS / DNA 만 구현한다. 데이터패스는 아직 안 붙인다.
-//  PS 가 0x00 에서 0x54444302 를 읽으면 PL-PS 경로가 살아 있다는 뜻이고,
-//  0x10 에서 DNA(0x3D996854)가 나오면 TDC 도메인까지 이어진 것이다.
-//  CAP_N / PHASE_TGT / DANGER / CAP_CNT / DIE_TEMP / RO_FREQ 는 2단계 이후.
+//  [★ 2026-09-05 — 2단계. 히스토그램을 AXI 로 읽는다]
+//  1단계 주석에는 "대용량 메모리는 AXI BRAM Controller IP 가 맡는다"고 적혀
+//  있었다. 2단계에서 그 방침을 뒤집었다. 왜:
+//    - 히스토그램은 읽기 전용 384워드뿐이라 IP 를 하나 더 얹을 값어치가 없다.
+//    - BRAM 은 이미 tdc_histogram.v 안에 RTL 로 추론돼 있다. AXI BRAM Controller
+//      는 원래 Block Memory Generator IP 와 짝을 이루는 물건이라, RTL 배열에
+//      붙이려면 BRAM 인터페이스를 BD 밖으로 빼서 손으로 이어야 한다.
+//    - 캐리체인 배치 제약(SLICE LOC/BEL)이 RTL 계층 이름에 묶여 있어, 설계를
+//      BD 로 옮길수록 제약이 깨질 위험이 커진다. "PS 만 BD, TDC 는 RTL" 경계를
+//      유지하는 편이 안전하다.
+//  대신 Port B 의 클럭을 s_axi_aclk 로 옮겨서(= tdc_histogram.v 변경) AXI 쪽은
+//  전부 동기 논리가 되게 했다. 그래서 히스토그램 읽기에는 CDC 가 아예 없다.
+//  교정표(4단계)는 쓰기가 필요하고 타임스탬프 파이프라인이 매 클럭 읽으므로
+//  사정이 다르다. 그때 다시 판단할 것.
+//
+//  [구현 범위]
+//   1단계 : ID / BUILD / CTRL / STATUS / DNA
+//   2단계 : + RO_CNT / DIE_TEMP / PHASE / HISTO[0..383]
+//           -> ILA 와 BTNU 버튼 없이 Vitis 만으로 Mode 1 측정이 끝난다.
+//   이후   : CAP_N / DANGER / CAP_CNT / 캡처버퍼 (3단계)
 //
 //  [클럭이 두 개인 이유]
 //    s_axi_aclk : PS 의 FCLK_CLK0 (100 MHz).
@@ -34,9 +46,11 @@
 // =============================================================================
 
 module tdc_axi_regs #(
-    parameter integer C_S_AXI_ADDR_WIDTH = 8,     // 64 워드. 상위 주소는 별칭으로 접힌다
+    // ★ 2026-09-05 : 8 -> 16. 히스토그램 창(0x1000~0x15FF)을 담으려면 주소 비트 12가
+    //   필요하다. 8비트로는 0x1000 이 0x00 으로 접혀 ID 레지스터와 충돌한다.
+    parameter integer C_S_AXI_ADDR_WIDTH = 16,    // 64 KB 어퍼처 전체
     parameter integer CHAIN_STAGES       = 96,    // BUILD 레지스터에 실어 보낼 값
-    parameter [7:0]   REGMAP_VER         = 8'd2
+    parameter [7:0]   REGMAP_VER         = 8'd3   // ★ 2026-09-05 : 2 -> 3 (맵이 늘었다)
 )(
     // ---------------- AXI4-Lite 슬레이브 (s_axi_aclk 도메인) ----------------
     input  wire                            s_axi_aclk,
@@ -73,13 +87,31 @@ module tdc_axi_regs #(
     input  wire                            stat_done,
     input  wire                            stat_phase_busy,
 
+    // ★ 2026-09-05 추가 : 측정 조건 (RO 주파수 / 다이 온도)
+    //   stat_meas_strobe 는 10 ms 게이트마다 1클럭 뜨는 "값 갱신 완료" 펄스다.
+    //   이 펄스로 토글을 만들어 AXI 쪽이 그때만 32/16비트를 통째로 래치한다.
+    //   왜 비트별 2FF 로 하지 않나 : ro_cnt 는 32비트라 갱신 순간에 걸리면
+    //   상위·하위가 섞인 값이 읽힌다. 10 ms(=AXI 100만 클럭)에 한 번뿐이라
+    //   드물지만 0 은 아니고, 그렇게 나온 값은 조용히 틀린다.
+    input  wire                            stat_meas_strobe,
+    input  wire [31:0]                     stat_ro_cnt,
+    input  wire [15:0]                     stat_die_temp,
+    input  wire [8:0]                      stat_phase_cur,
+
+    // ★ 2026-09-05 추가 : 히스토그램 읽기 창 (전부 s_axi_aclk 도메인)
+    //   tdc_histogram 의 BRAM Port B 에 직접 붙는다. Port B 클럭이 s_axi_aclk 라
+    //   여기에는 CDC 가 없다. 읽기 지연 1클럭은 아래 §3 에서 처리한다.
+    output reg  [8:0]                      histo_addr,
+    input  wire [31:0]                     histo_data,
+
     // 제어 출력 (AXI 도메인 -> 이 모듈이 TDC 도메인으로 동기화해서 내보낸다)
     output reg  [1:0]                      ctrl_hit_src,   // 00=off 01=RO 10=DPS 11=EXT
     output reg                             ctrl_start,
     output reg                             ctrl_stop,
     output reg                             ctrl_histo_clr,
     output reg                             ctrl_tdc_rst,
-    output reg                             ctrl_cap_fmt
+    output reg                             ctrl_cap_fmt,
+    output reg  [8:0]                      ctrl_phase_tgt  // ★ 2026-09-05 : BTNU 대체
 );
 
     // ---------------- 레지스터 주소 (워드 단위) ----------------
@@ -87,7 +119,17 @@ module tdc_axi_regs #(
                      A_BUILD  = 6'h1,   // 0x04  R   빌드 정보
                      A_CTRL   = 6'h2,   // 0x08  RW  제어
                      A_STATUS = 6'h3,   // 0x0C  R   상태
-                     A_DNA    = 6'h4;   // 0x10  R   보드 식별자
+                     A_DNA    = 6'h4,   // 0x10  R   보드 식별자
+                     // ★ 2026-09-05 추가
+                     A_ROCNT  = 6'h5,   // 0x14  R   RO 에지 수 / 10 ms 게이트
+                     A_TEMP   = 6'h6,   // 0x18  R   [15:0] XADC 온도 raw
+                     A_PHASE  = 6'h7;   // 0x1C  RW  [8:0] 목표, [24:16] 현재 위상
+
+    // ★ 2026-09-05 : 영역 구분은 주소 비트 12 로 한다.
+    //   addr[12]=0 -> 위 레지스터들 (0x0000~0x0FFF, 하위 8비트만 디코딩)
+    //   addr[12]=1 -> 히스토그램   (0x1000 + 탭*4, 탭 0..383 이면 0x1000~0x15FF)
+    //   64K 어퍼처 안이므로 BD 의 주소 할당은 그대로 두면 된다.
+    localparam integer HISTO_SEL_BIT = 12;
 
     localparam [31:0] ID_MAGIC   = 32'h5444_4302;         // "TD" "C" + regmap ver
     localparam [15:0] NUM_TAPS_C = CHAIN_STAGES * 4;
@@ -99,7 +141,8 @@ module tdc_axi_regs #(
     //    (금지된 것은 그 반대, 즉 VALID 가 READY 에 의존하는 것이다).
     // =========================================================================
     reg [31:0] ctrl_reg;
-    reg        ctrl_upd_tgl;      // CTRL 을 쓸 때마다 토글. CDC 용.
+    reg [8:0]  phase_reg;         // ★ 2026-09-05 : 목표 위상 (0..279)
+    reg        ctrl_upd_tgl;      // CTRL/PHASE 를 쓸 때마다 토글. CDC 용.
     reg        bvalid_r;
 
     wire wr_go = s_axi_awvalid & s_axi_wvalid & ~bvalid_r;
@@ -114,6 +157,7 @@ module tdc_axi_regs #(
     always @(posedge s_axi_aclk) begin
         if (!s_axi_aresetn) begin
             ctrl_reg     <= 32'd0;
+            phase_reg    <= 9'd0;
             ctrl_upd_tgl <= 1'b0;
             bvalid_r     <= 1'b0;
         end else begin
@@ -123,6 +167,15 @@ module tdc_axi_regs #(
                     if (s_axi_wstrb[1]) ctrl_reg[15: 8] <= s_axi_wdata[15: 8];
                     if (s_axi_wstrb[2]) ctrl_reg[23:16] <= s_axi_wdata[23:16];
                     if (s_axi_wstrb[3]) ctrl_reg[31:24] <= s_axi_wdata[31:24];
+                    ctrl_upd_tgl <= ~ctrl_upd_tgl;
+                end
+                // ★ 2026-09-05 : PHASE 도 같은 토글을 쓴다.
+                //   토글 하나로 두 레지스터를 함께 래치하므로, 어느 쪽을 써도
+                //   TDC 도메인은 둘 다 최신값으로 갱신한다. 토글을 따로 두면
+                //   토글 2개의 도착 순서를 또 따져야 해서 오히려 위험하다.
+                if (wr_word == A_PHASE) begin
+                    if (s_axi_wstrb[0]) phase_reg[7:0] <= s_axi_wdata[7:0];
+                    if (s_axi_wstrb[1]) phase_reg[8]   <= s_axi_wdata[8];
                     ctrl_upd_tgl <= ~ctrl_upd_tgl;
                 end
                 bvalid_r <= 1'b1;
@@ -148,6 +201,44 @@ module tdc_axi_regs #(
         dna_d1 <= stat_dna;   dna_d2 <= dna_d1;
     end
 
+    // ---- ★ 2026-09-05 : RO 카운트 / 다이 온도 (다중 비트, 10 ms 마다 갱신) ----
+    //   TDC 도메인에서 meas_strobe 로 토글을 만들고, AXI 도메인이 그 토글의
+    //   변화를 보고 32/16비트를 통째로 래치한다. CTRL 의 토글 핸드셰이크와
+    //   같은 방식이되 방향만 반대다.
+    //   왜 안전한가 : 데이터는 다음 게이트까지 10 ms 동안 그대로 있으므로,
+    //   토글이 2FF 를 통과하는 20 ns 사이에 값이 바뀔 수 없다.
+    reg meas_tgl = 1'b0;
+    always @(posedge tdc_clk or negedge tdc_rst_n) begin
+        if (!tdc_rst_n)             meas_tgl <= 1'b0;
+        else if (stat_meas_strobe)  meas_tgl <= ~meas_tgl;
+    end
+
+    (* ASYNC_REG = "TRUE" *) reg mt_d1 = 1'b0, mt_d2 = 1'b0;
+    reg mt_d3 = 1'b0;
+    reg [31:0] ro_cnt_lat   = 32'd0;
+    reg [15:0] die_temp_lat = 16'd0;
+
+    always @(posedge s_axi_aclk) begin
+        mt_d1 <= meas_tgl;   // 동기화 1단 (비동기 입력)
+        mt_d2 <= mt_d1;      // 동기화 2단 (메타스테이빌리티 해소)
+        mt_d3 <= mt_d2;      // 에지 검출용
+        if (mt_d2 ^ mt_d3) begin
+            ro_cnt_lat   <= stat_ro_cnt;
+            die_temp_lat <= stat_die_temp;
+        end
+    end
+
+    // ---- ★ 2026-09-05 : 현재 위상 (9비트) ----
+    //   주의 : 이 값은 PHASE_BUSY 가 0 일 때만 믿을 것.
+    //   위상이 움직이는 중에는 2FF 통과 시점에 따라 옛값/새값이 섞일 수 있다.
+    //   소프트웨어는 어차피 "목표를 쓰고 -> BUSY 가 0 이 될 때까지 기다리고 ->
+    //   현재 위상을 읽는" 순서로 쓰므로 실제로는 문제되지 않는다.
+    (* ASYNC_REG = "TRUE" *) reg [8:0] ph_d1 = 9'd0, ph_d2 = 9'd0;
+    always @(posedge s_axi_aclk) begin
+        ph_d1 <= stat_phase_cur;
+        ph_d2 <= ph_d1;
+    end
+
     wire [31:0] status_word = { 26'd0,
                                 st_d2[4],    // [5] PHASE_BUSY
                                 st_d2[3],    // [4] DONE
@@ -162,7 +253,21 @@ module tdc_axi_regs #(
     reg [31:0] rdata_r;
     reg        rvalid_r;
 
-    wire rd_go = s_axi_arvalid & ~rvalid_r;
+    // ★ 2026-09-05 : 히스토그램 읽기는 BRAM 을 거치므로 즉답이 안 된다.
+    //   BRAM Port B 출력이 레지스터드라, 주소를 걸고 나서 데이터가 나오기까지
+    //   시간이 걸린다. 정확히는 이 순서다.
+    //     T   : rd_go. histo_addr 에 주소를 실어 둔다(다음 클럭부터 유효).
+    //     T+1 : BRAM 이 그 주소를 샘플링한다.
+    //     T+2 : histo_data 가 유효해진다. 여기서 잡아 rvalid 를 올린다.
+    //   hpend 는 이 2클럭을 세는 시프트 레지스터다.
+    //   이걸 안 하고 즉시 rvalid 를 올리면 '직전 주소의 값'이 읽힌다 —
+    //   ILA 시절 probe_read_addr_d1 로 해결했던 것과 정확히 같은 함정이다.
+    reg [1:0] hpend = 2'b00;
+    wire      histo_busy = |hpend;
+
+    // 진행 중인 히스토그램 읽기가 있으면 새 요청을 받지 않는다.
+    wire rd_go   = s_axi_arvalid & ~rvalid_r & ~histo_busy;
+    wire is_hist = s_axi_araddr[HISTO_SEL_BIT];
 
     assign s_axi_arready = rd_go;
     assign s_axi_rvalid  = rvalid_r;
@@ -173,18 +278,32 @@ module tdc_axi_regs #(
 
     always @(posedge s_axi_aclk) begin
         if (!s_axi_aresetn) begin
-            rdata_r  <= 32'd0;
-            rvalid_r <= 1'b0;
+            rdata_r    <= 32'd0;
+            rvalid_r   <= 1'b0;
+            hpend      <= 2'b00;
+            histo_addr <= 9'd0;
         end else begin
-            if (rd_go) begin
+            hpend <= { hpend[0], 1'b0 };     // 기본은 한 칸 밀기
+
+            if (rd_go && is_hist) begin
+                // 0x1000 + 탭*4 -> 탭 번호는 주소 비트 [10:2]
+                histo_addr <= s_axi_araddr[10:2];
+                hpend      <= 2'b01;
+            end else if (rd_go) begin
                 case (rd_word)
                     A_ID:     rdata_r <= ID_MAGIC;
                     A_BUILD:  rdata_r <= { NUM_TAPS_C, CHAIN_STAGES[7:0], REGMAP_VER };
                     A_CTRL:   rdata_r <= ctrl_reg;
                     A_STATUS: rdata_r <= status_word;
                     A_DNA:    rdata_r <= { st_d2[1], dna_d2 };   // [31] = dna_valid
+                    A_ROCNT:  rdata_r <= ro_cnt_lat;
+                    A_TEMP:   rdata_r <= { 16'd0, die_temp_lat };
+                    A_PHASE:  rdata_r <= { 7'd0, ph_d2, 7'd0, phase_reg };
                     default:  rdata_r <= 32'hDEAD_0000;          // 없는 주소를 눈에 띄게
                 endcase
+                rvalid_r <= 1'b1;
+            end else if (hpend[1]) begin
+                rdata_r  <= histo_data;      // BRAM 출력이 유효해진 사이클
                 rvalid_r <= 1'b1;
             end else if (rvalid_r && s_axi_rready) begin
                 rvalid_r <= 1'b0;
@@ -210,6 +329,7 @@ module tdc_axi_regs #(
             ctrl_histo_clr <= 1'b0;
             ctrl_tdc_rst   <= 1'b0;
             ctrl_cap_fmt   <= 1'b0;
+            ctrl_phase_tgt <= 9'd0;
         end else begin
             tgl_d1 <= ctrl_upd_tgl;   // 동기화 1단 (비동기 입력)
             tgl_d2 <= tgl_d1;         // 동기화 2단 (메타스테이빌리티 해소)
@@ -222,6 +342,7 @@ module tdc_axi_regs #(
                 ctrl_histo_clr <= ctrl_reg[4];
                 ctrl_tdc_rst   <= ctrl_reg[5];
                 ctrl_cap_fmt   <= ctrl_reg[6];
+                ctrl_phase_tgt <= phase_reg;   // ★ 2026-09-05
             end
         end
     end
