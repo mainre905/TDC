@@ -50,7 +50,7 @@ module tdc_axi_regs #(
     //   필요하다. 8비트로는 0x1000 이 0x00 으로 접혀 ID 레지스터와 충돌한다.
     parameter integer C_S_AXI_ADDR_WIDTH = 16,    // 64 KB 어퍼처 전체
     parameter integer CHAIN_STAGES       = 96,    // BUILD 레지스터에 실어 보낼 값
-    parameter [7:0]   REGMAP_VER         = 8'd3   // ★ 2026-09-05 : 2 -> 3 (맵이 늘었다)
+    parameter [7:0]   REGMAP_VER         = 8'd4   // ★ 2026-09-05 : 3 -> 4 (시퀀서)
 )(
     // ---------------- AXI4-Lite 슬레이브 (s_axi_aclk 도메인) ----------------
     input  wire                            s_axi_aclk,
@@ -98,6 +98,19 @@ module tdc_axi_regs #(
     input  wire [15:0]                     stat_die_temp,
     input  wire [8:0]                      stat_phase_cur,
 
+    // ★ 2026-09-05 추가 : 시퀀서 상태 (전부 tdc_clk 도메인)
+    //   snap_tgl 이 바뀔 때 아래 값들을 한꺼번에 래치한다. 누적 중에는 10 ms 마다,
+    //   상태가 넘어갈 때는 그 즉시 토글이 온다. 값들이 서로 정합해야 하므로
+    //   (예: hit_cnt 와 ro_at_end 가 같은 시점의 것이어야 한다) 토글 하나로 묶는다.
+    input  wire                            stat_snap_tgl,
+    input  wire [31:0]                     stat_hit_cnt,
+    input  wire [31:0]                     stat_drop_cnt,
+    input  wire [31:0]                     stat_ro_start,
+    input  wire [31:0]                     stat_ro_end,
+    input  wire [15:0]                     stat_temp_start,
+    input  wire [15:0]                     stat_temp_end,
+    input  wire [2:0]                      stat_state,
+
     // ★ 2026-09-05 추가 : 히스토그램 읽기 창 (전부 s_axi_aclk 도메인)
     //   tdc_histogram 의 BRAM Port B 에 직접 붙는다. Port B 클럭이 s_axi_aclk 라
     //   여기에는 CDC 가 없다. 읽기 지연 1클럭은 아래 §3 에서 처리한다.
@@ -111,7 +124,9 @@ module tdc_axi_regs #(
     output reg                             ctrl_histo_clr,
     output reg                             ctrl_tdc_rst,
     output reg                             ctrl_cap_fmt,
-    output reg  [8:0]                      ctrl_phase_tgt  // ★ 2026-09-05 : BTNU 대체
+    output reg  [8:0]                      ctrl_phase_tgt, // ★ 2026-09-05 : BTNU 대체
+    output reg  [31:0]                     ctrl_target_hits,
+    output reg  [31:0]                     ctrl_settle_n
 );
 
     // ---------------- 레지스터 주소 (워드 단위) ----------------
@@ -121,9 +136,26 @@ module tdc_axi_regs #(
                      A_STATUS = 6'h3,   // 0x0C  R   상태
                      A_DNA    = 6'h4,   // 0x10  R   보드 식별자
                      // ★ 2026-09-05 추가
+                     // ★ RO_CNT 는 에지 수지 Hz 가 아니다. 환산식을 여기 박아둔다 —
+                     //   이 식이 코드에 없어서 2026-09-04 문서가 2배 틀린 값을 실었다.
+                     //     ro_divider_cnt 는 RO 상승엣지마다 +1 (tdc_test_top.v)
+                     //     측정 탭이 [1] 이므로 그 비트는 4번 증가마다 한 주기
+                     //     ro_edge 는 상승엣지만 세므로 RO 4주기당 1카운트
+                     //   ->  f_RO [Hz] = RO_CNT x 4 / 0.01 s
+                     //   ->  히트율   = f_RO / 64   (hit_random = ro_divider_cnt[5])
+                     //   검증 : 2026-09-05 3단계에서 RO_CNT 168,194 -> 67.28 MHz
+                     //          -> 히트율 1.051 MHz, 실측 200만발/1.9초 = 1.05 MHz.
                      A_ROCNT  = 6'h5,   // 0x14  R   RO 에지 수 / 10 ms 게이트
                      A_TEMP   = 6'h6,   // 0x18  R   [15:0] XADC 온도 raw
-                     A_PHASE  = 6'h7;   // 0x1C  RW  [8:0] 목표, [24:16] 현재 위상
+                     A_PHASE  = 6'h7,   // 0x1C  RW  [8:0] 목표, [24:16] 현재 위상
+                     // ★ 2026-09-05 추가 — 시퀀서 (맵 버전 4)
+                     A_TARGET = 6'h8,   // 0x20  RW  목표 히트 수
+                     A_HITCNT = 6'h9,   // 0x24  R   실제 누적된 히트 수
+                     A_SETTLE = 6'hA,   // 0x28  RW  RO 안정화 대기 클럭 수
+                     A_ROSTA  = 6'hB,   // 0x2C  R   측정 시작 시 RO 에지 수
+                     A_ROEND  = 6'hC,   // 0x30  R   측정 종료 시 RO 에지 수
+                     A_TEMPSE = 6'hD,   // 0x34  R   {끝 온도[31:16], 시작 온도[15:0]}
+                     A_DROP   = 6'hE;   // 0x38  R   데드타임에 버려진 히트 수
 
     // ★ 2026-09-05 : 영역 구분은 주소 비트 12 로 한다.
     //   addr[12]=0 -> 위 레지스터들 (0x0000~0x0FFF, 하위 8비트만 디코딩)
@@ -142,6 +174,12 @@ module tdc_axi_regs #(
     // =========================================================================
     reg [31:0] ctrl_reg;
     reg [8:0]  phase_reg;         // ★ 2026-09-05 : 목표 위상 (0..279)
+    reg [31:0] target_reg;        // ★ 2026-09-05 : 목표 히트 수
+    // SETTLE_N 기본 20,000 클럭 = 100 us @ 200 MHz.
+    //  ★ 이 값은 근거 있는 값이 아니다. RO 를 껐다 켠 직후 거동이 측정된 적이
+    //    없어 넉넉히 잡은 것이다. RO_CNT 가 몇 게이트 만에 수렴하는지 재서
+    //    실측값으로 바꿀 것.
+    reg [31:0] settle_reg = 32'd20000;
     reg        ctrl_upd_tgl;      // CTRL/PHASE 를 쓸 때마다 토글. CDC 용.
     reg        bvalid_r;
 
@@ -158,6 +196,8 @@ module tdc_axi_regs #(
         if (!s_axi_aresetn) begin
             ctrl_reg     <= 32'd0;
             phase_reg    <= 9'd0;
+            target_reg   <= 32'd0;
+            settle_reg   <= 32'd20000;
             ctrl_upd_tgl <= 1'b0;
             bvalid_r     <= 1'b0;
         end else begin
@@ -176,6 +216,22 @@ module tdc_axi_regs #(
                 if (wr_word == A_PHASE) begin
                     if (s_axi_wstrb[0]) phase_reg[7:0] <= s_axi_wdata[7:0];
                     if (s_axi_wstrb[1]) phase_reg[8]   <= s_axi_wdata[8];
+                    ctrl_upd_tgl <= ~ctrl_upd_tgl;
+                end
+                // ★ 2026-09-05 : TARGET/SETTLE 도 같은 토글에 실어 보낸다.
+                //   32비트라 바이트 스트로브를 그대로 존중한다.
+                if (wr_word == A_TARGET) begin
+                    if (s_axi_wstrb[0]) target_reg[ 7: 0] <= s_axi_wdata[ 7: 0];
+                    if (s_axi_wstrb[1]) target_reg[15: 8] <= s_axi_wdata[15: 8];
+                    if (s_axi_wstrb[2]) target_reg[23:16] <= s_axi_wdata[23:16];
+                    if (s_axi_wstrb[3]) target_reg[31:24] <= s_axi_wdata[31:24];
+                    ctrl_upd_tgl <= ~ctrl_upd_tgl;
+                end
+                if (wr_word == A_SETTLE) begin
+                    if (s_axi_wstrb[0]) settle_reg[ 7: 0] <= s_axi_wdata[ 7: 0];
+                    if (s_axi_wstrb[1]) settle_reg[15: 8] <= s_axi_wdata[15: 8];
+                    if (s_axi_wstrb[2]) settle_reg[23:16] <= s_axi_wdata[23:16];
+                    if (s_axi_wstrb[3]) settle_reg[31:24] <= s_axi_wdata[31:24];
                     ctrl_upd_tgl <= ~ctrl_upd_tgl;
                 end
                 bvalid_r <= 1'b1;
@@ -228,6 +284,30 @@ module tdc_axi_regs #(
         end
     end
 
+    // ---- ★ 2026-09-05 : 시퀀서 스냅샷 (다중 비트 6종) ----
+    //   snap_tgl 이 바뀔 때 여섯 값을 한꺼번에 래치한다. 토글을 하나로 묶은 이유는
+    //   값들이 서로 정합해야 하기 때문이다 — hit_cnt 와 ro_at_end 가 다른 시점의
+    //   것이면 "이 측정의 조건" 이라는 말 자체가 성립하지 않는다.
+    (* ASYNC_REG = "TRUE" *) reg sn_d1 = 1'b0, sn_d2 = 1'b0;
+    reg sn_d3 = 1'b0;
+    reg [31:0] hit_cnt_lat  = 32'd0, drop_cnt_lat = 32'd0;
+    reg [31:0] ro_sta_lat   = 32'd0, ro_end_lat   = 32'd0;
+    reg [15:0] tmp_sta_lat  = 16'd0, tmp_end_lat  = 16'd0;
+
+    always @(posedge s_axi_aclk) begin
+        sn_d1 <= stat_snap_tgl;
+        sn_d2 <= sn_d1;
+        sn_d3 <= sn_d2;
+        if (sn_d2 ^ sn_d3) begin
+            hit_cnt_lat  <= stat_hit_cnt;
+            drop_cnt_lat <= stat_drop_cnt;
+            ro_sta_lat   <= stat_ro_start;
+            ro_end_lat   <= stat_ro_end;
+            tmp_sta_lat  <= stat_temp_start;
+            tmp_end_lat  <= stat_temp_end;
+        end
+    end
+
     // ---- ★ 2026-09-05 : 현재 위상 (9비트) ----
     //   주의 : 이 값은 PHASE_BUSY 가 0 일 때만 믿을 것.
     //   위상이 움직이는 중에는 2FF 통과 시점에 따라 옛값/새값이 섞일 수 있다.
@@ -239,12 +319,24 @@ module tdc_axi_regs #(
         ph_d2 <= ph_d1;
     end
 
-    wire [31:0] status_word = { 26'd0,
+    // ★ 2026-09-05 : 시퀀서 상태를 STATUS[10:8] 에 실어 보낸다.
+    //   FSM 이 어느 상태에서 멈췄는지 PS 가 바로 볼 수 있어야 디버깅이 된다.
+    //   3비트라 비트별 2FF 로도 잠깐 섞일 수 있으나, 상태는 사람이 폴링해서
+    //   보는 용도이고 잘못 읽어도 다음 폴링에서 바로잡힌다.
+    (* ASYNC_REG = "TRUE" *) reg [2:0] sstate_d1, sstate_d2;
+    always @(posedge s_axi_aclk) begin
+        sstate_d1 <= stat_state;
+        sstate_d2 <= sstate_d1;
+    end
+
+    wire [31:0] status_word = { 21'd0,
+                                sstate_d2,   // [10:8] 시퀀서 상태 (0..5)
+                                2'd0,        // [7:6] 예약
                                 st_d2[4],    // [5] PHASE_BUSY
                                 st_d2[3],    // [4] DONE
                                 st_d2[2],    // [3] BUSY
                                 st_d2[1],    // [2] DNA_VALID
-                                1'b0,        // [1] 예약 (2단계에서 HISTO_CLR_BUSY)
+                                1'b0,        // [1] 예약
                                 st_d2[0] };  // [0] MMCM_LOCKED
 
     // =========================================================================
@@ -299,6 +391,13 @@ module tdc_axi_regs #(
                     A_ROCNT:  rdata_r <= ro_cnt_lat;
                     A_TEMP:   rdata_r <= { 16'd0, die_temp_lat };
                     A_PHASE:  rdata_r <= { 7'd0, ph_d2, 7'd0, phase_reg };
+                    A_TARGET: rdata_r <= target_reg;
+                    A_HITCNT: rdata_r <= hit_cnt_lat;
+                    A_SETTLE: rdata_r <= settle_reg;
+                    A_ROSTA:  rdata_r <= ro_sta_lat;
+                    A_ROEND:  rdata_r <= ro_end_lat;
+                    A_TEMPSE: rdata_r <= { tmp_end_lat, tmp_sta_lat };
+                    A_DROP:   rdata_r <= drop_cnt_lat;
                     default:  rdata_r <= 32'hDEAD_0000;          // 없는 주소를 눈에 띄게
                 endcase
                 rvalid_r <= 1'b1;
@@ -330,6 +429,8 @@ module tdc_axi_regs #(
             ctrl_tdc_rst   <= 1'b0;
             ctrl_cap_fmt   <= 1'b0;
             ctrl_phase_tgt <= 9'd0;
+            ctrl_target_hits <= 32'd0;
+            ctrl_settle_n    <= 32'd20000;
         end else begin
             tgl_d1 <= ctrl_upd_tgl;   // 동기화 1단 (비동기 입력)
             tgl_d2 <= tgl_d1;         // 동기화 2단 (메타스테이빌리티 해소)
@@ -342,7 +443,9 @@ module tdc_axi_regs #(
                 ctrl_histo_clr <= ctrl_reg[4];
                 ctrl_tdc_rst   <= ctrl_reg[5];
                 ctrl_cap_fmt   <= ctrl_reg[6];
-                ctrl_phase_tgt <= phase_reg;   // ★ 2026-09-05
+                ctrl_phase_tgt   <= phase_reg;   // ★ 2026-09-05
+                ctrl_target_hits <= target_reg;
+                ctrl_settle_n    <= settle_reg;
             end
         end
     end

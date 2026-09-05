@@ -38,7 +38,26 @@ module tdc_test_top #(
     output wire [15:0] o_die_temp,    // XADC 온도 raw
     output wire [8:0]  o_phase_cur,   // 현재 위상 스텝 (0..279)
     input  wire [8:0]  i_phase_tgt,   // 목표 위상 — BTNU 임시 블록을 대체한다
-    input  wire        i_histo_clr,   // 히스토그램 지우기 (레벨)
+    input  wire        i_histo_clr,   // 히스토그램 지우기 (레벨, 소프트웨어 수동)
+
+    // ★ [2026-09-05 추가 — AXI 3단계] 시퀀서 FSM
+    //   CTRL.START 하나로 "RO 켜기 -> 주파수 재기 -> 안정화 -> 누적 -> 완료"가
+    //   자동으로 돈다. 상세는 RTL/tdc_seq.v 헤더 참조.
+    input  wire        i_ctrl_start,
+    input  wire        i_ctrl_stop,
+    input  wire [1:0]  i_ctrl_hit_src,
+    input  wire [31:0] i_target_hits,
+    input  wire [31:0] i_settle_n,
+    output wire        o_busy,
+    output wire        o_done,
+    output wire [2:0]  o_state,
+    output wire [31:0] o_hit_cnt,     // 실제 누적된 히트 수 (384탭 합과 같아야 함)
+    output wire [31:0] o_drop_cnt,    // 데드타임에 버려진 히트 수
+    output wire [31:0] o_ro_start,
+    output wire [31:0] o_ro_end,
+    output wire [15:0] o_temp_start,
+    output wire [15:0] o_temp_end,
+    output wire        o_snap_tgl,    // 위 값들의 CDC 토글
 
     // ★ [2026-09-05 추가] 히스토그램 BRAM Port B — 전부 AXI 클럭 도메인이다.
     //   ILA 리드아웃 스캐너를 걷어내고 그 자리를 AXI 가 받는다.
@@ -51,6 +70,10 @@ module tdc_test_top #(
     // ★ [2026-09-03 추가] 탭 수 — 히스토그램 리드아웃 스캔 범위에 쓴다.
     //   히스토그램 BRAM 은 512칸(tdc_bram_512x32)이므로 448탭까지 그대로 담긴다.
     localparam integer NUM_TAPS = CARRY4_STAGES * 4;
+
+    // ★ 2026-09-05 : 시퀀서(tdc_seq)와 주고받는 신호. 인스턴스는 §6 아래에 있다.
+    wire        seq_ro_en, seq_histo_en, seq_histo_clr;
+    wire        histo_hit_accepted, histo_hit_dropped;
 
     // ==========================================
     // 1. Clock Generation & MMCM Phase Shifter
@@ -143,8 +166,21 @@ module tdc_test_top #(
     // ==========================================
     // 2. Ring Oscillator (Mode 1용)
     // ==========================================
+    // ★ 2026-09-05 : RO 를 시퀀서가 껐다 켠다.
+    //   [무엇이 있었나] ro_enable_reg <= clk_locked (clk_125 도메인).
+    //     즉 MMCM 이 잠기는 순간 발진을 시작해 그 뒤로 영영 멈추지 않았다.
+    //     끄는 조건이 아예 없었다.
+    //   [왜 바꾸나] FSM 의 S_RO_ENABLE 이 의미를 가지려면 실제로 껐다 켤 수
+    //     있어야 한다. LUT2(INIT=4'h7 = NAND)가 게이트라, ro_enable_reg=0 이면
+    //     출력이 상수 1 이 되어 고리가 끊긴다.
+    //   [따라오는 것] RO 가 꺼지면 ro_clk_buffered 가 아예 멈추고 ro_divider_cnt
+    //     가 얼어붙는다. 다시 켜면 얼었던 자리에서 이어 센다. 코드밀도에는
+    //     무관하다(히트 위상이 무작위이기만 하면 된다).
+    //   [도메인] clk_125(=FCLK 100 MHz) -> tdc_clk(200 MHz) 로 옮겼다.
+    //     FSM 이 tdc_clk 에 살기 때문이다. 원래 clk_125 였던 이유는 코드에
+    //     적혀 있지 않고, 단일 비트 레벨이라 어느 쪽이든 동작에 문제없다.
     (* KEEP = "TRUE", DONT_TOUCH = "TRUE" *) reg ro_enable_reg = 1'b0;
-    always @(posedge clk_125) ro_enable_reg <= clk_locked;
+    always @(posedge clk_200_fixed) ro_enable_reg <= clk_locked & seq_ro_en;
 
     (* ALLOW_COMBINATORIAL_LOOPS = "TRUE", KEEP = "TRUE", DONT_TOUCH = "TRUE" *) wire [30:0] ro_chain;
     genvar r; generate 
@@ -399,10 +435,46 @@ module tdc_test_top #(
         .rst_n       (clk_locked),
         .ts_fine_idx (aligned_fine_idx),
         .ts_valid    (gated_ts_valid),
-        .histo_clr   (i_histo_clr),
+        // ★ 2026-09-05 : 지우기는 두 곳에서 온다 — 소프트웨어 수동(CTRL.HISTO_CLR)과
+        //   시퀀서의 S_STABILIZE. 둘 다 레벨이라 OR 로 합치면 된다.
+        .histo_clr   (i_histo_clr | seq_histo_clr),
+        .en          (seq_histo_en),
+        .hit_accepted(histo_hit_accepted),
+        .hit_dropped (histo_hit_dropped),
         .clk_b       (i_axi_clk),
         .read_addr   (i_histo_addr),
         .read_data   (o_histo_data)
+    );
+
+    // ==========================================================
+    // ★ 2026-09-05 : 측정 시퀀서 FSM
+    // ==========================================================
+    tdc_seq u_seq (
+        .clk           (tdc_clk),
+        .rst_n         (clk_locked),
+        .ctrl_start    (i_ctrl_start),
+        .ctrl_stop     (i_ctrl_stop),
+        .ctrl_hit_src  (i_ctrl_hit_src),
+        .target_hits   (i_target_hits),
+        .settle_n      (i_settle_n),
+        .meas_strobe   (meas_strobe),
+        .ro_cnt        (ro_meas_cnt),
+        .die_temp      (die_temp_at_meas),
+        .hit_accepted  (histo_hit_accepted),
+        .hit_dropped   (histo_hit_dropped),
+        .ro_en         (seq_ro_en),
+        .histo_en      (seq_histo_en),
+        .histo_clr     (seq_histo_clr),
+        .busy          (o_busy),
+        .done          (o_done),
+        .state_out     (o_state),
+        .hit_cnt       (o_hit_cnt),
+        .drop_cnt      (o_drop_cnt),
+        .ro_at_start   (o_ro_start),
+        .ro_at_end     (o_ro_end),
+        .temp_at_start (o_temp_start),
+        .temp_at_end   (o_temp_end),
+        .snap_tgl      (o_snap_tgl)
     );
 
     assign led[0] = clk_locked;

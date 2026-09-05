@@ -198,6 +198,13 @@ module tdc_zedboard_top #(
     wire [8:0]  histo_addr;
     wire [31:0] histo_data;
 
+    // ★ 2026-09-05 : 시퀀서 FSM 신호
+    wire        seq_busy, seq_done, seq_snap_tgl;
+    wire [2:0]  seq_state;
+    wire [31:0] seq_hit_cnt, seq_drop_cnt, seq_ro_start, seq_ro_end;
+    wire [15:0] seq_temp_start, seq_temp_end;
+    wire [31:0] ctrl_target_hits, ctrl_settle_n;
+
     // ★ 2026-09-05 : ctrl_histo_clr 를 아래 u_core 인스턴스가 먼저 쓰므로
     //   선언이 여기 있어야 한다 (Verilog 는 암시적 선언을 1비트로 만들어 버린다).
     wire [1:0] ctrl_hit_src;
@@ -228,7 +235,24 @@ module tdc_zedboard_top #(
         // 히스토그램 BRAM Port B 는 AXI 클럭(fclk)으로 돈다
         .i_axi_clk     (fclk),
         .i_histo_addr  (histo_addr),
-        .o_histo_data  (histo_data)
+        .o_histo_data  (histo_data),
+
+        // ★ 2026-09-05 : 시퀀서
+        .i_ctrl_start   (ctrl_start),
+        .i_ctrl_stop    (ctrl_stop),
+        .i_ctrl_hit_src (ctrl_hit_src),
+        .i_target_hits  (ctrl_target_hits),
+        .i_settle_n     (ctrl_settle_n),
+        .o_busy         (seq_busy),
+        .o_done         (seq_done),
+        .o_state        (seq_state),
+        .o_hit_cnt      (seq_hit_cnt),
+        .o_drop_cnt     (seq_drop_cnt),
+        .o_ro_start     (seq_ro_start),
+        .o_ro_end       (seq_ro_end),
+        .o_temp_start   (seq_temp_start),
+        .o_temp_end     (seq_temp_end),
+        .o_snap_tgl     (seq_snap_tgl)
     );
 
     // =========================================================================
@@ -270,8 +294,8 @@ module tdc_zedboard_top #(
         .stat_mmcm_locked(tdc_locked),
         .stat_dna        (tdc_dna),
         .stat_dna_valid  (tdc_dna_valid),
-        .stat_busy       (1'b0),              // 3단계 시퀀서에서 연결
-        .stat_done       (1'b0),              // 3단계 시퀀서에서 연결
+        .stat_busy       (seq_busy),          // ★ 2026-09-05 : 시퀀서 연결
+        .stat_done       (seq_done),
         .stat_phase_busy (tdc_phase_busy),
 
         // ★ 2026-09-05 추가
@@ -282,13 +306,25 @@ module tdc_zedboard_top #(
         .histo_addr      (histo_addr),
         .histo_data      (histo_data),
 
+        // ★ 2026-09-05 : 시퀀서 스냅샷
+        .stat_snap_tgl   (seq_snap_tgl),
+        .stat_hit_cnt    (seq_hit_cnt),
+        .stat_drop_cnt   (seq_drop_cnt),
+        .stat_ro_start   (seq_ro_start),
+        .stat_ro_end     (seq_ro_end),
+        .stat_temp_start (seq_temp_start),
+        .stat_temp_end   (seq_temp_end),
+        .stat_state      (seq_state),
+
         .ctrl_hit_src    (ctrl_hit_src),
         .ctrl_start      (ctrl_start),
         .ctrl_stop       (ctrl_stop),
         .ctrl_histo_clr  (ctrl_histo_clr),
         .ctrl_tdc_rst    (ctrl_tdc_rst),
         .ctrl_cap_fmt    (ctrl_cap_fmt),
-        .ctrl_phase_tgt  (ctrl_phase_tgt)     // ★ 2026-09-05 : BTNU 대체
+        .ctrl_phase_tgt  (ctrl_phase_tgt),    // ★ 2026-09-05 : BTNU 대체
+        .ctrl_target_hits(ctrl_target_hits),
+        .ctrl_settle_n   (ctrl_settle_n)
     );
 
 endmodule

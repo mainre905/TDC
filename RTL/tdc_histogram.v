@@ -19,6 +19,22 @@ module tdc_histogram #(
     //   이 신호는 tdc_axi_regs 가 이미 tdc_clk 도메인으로 래치해서 준다.
     input wire                  histo_clr,
 
+    // ★ 2026-09-05 추가 : 시퀀서(tdc_seq)와 주고받는 신호
+    //   en           : 1 일 때만 누적한다. 0 이면 히트가 와도 버린다.
+    //                  FSM 의 S_HISTOGRAM 구간에서만 켠다.
+    //   hit_accepted : BRAM 에 실제로 반영된 히트. 1클럭 펄스.
+    //   hit_dropped  : 데드타임에 버려진 히트. 1클럭 펄스.
+    //
+    //   ★ 왜 accepted 를 따로 내보내나 :
+    //   이 모듈은 히트 하나에 4클럭을 쓴다 (IDLE -> RMW_R -> RMW_A -> RMW_W).
+    //   ts_valid 를 보는 것은 IDLE 한 사이클뿐이라 나머지 3클럭에 온 히트는
+    //   버려진다. 그래서 ts_valid 를 세면 BRAM 에 들어간 수보다 많아진다.
+    //   탭 폭이 w[i] = h[i]/H x 5000 ps 이므로 H 가 틀리면 모든 폭이 통째로
+    //   틀어진다. 총 히트 수는 반드시 '받아들인 것'만 세야 한다.
+    input wire                  en,
+    output wire                 hit_accepted,
+    output wire                 hit_dropped,
+
     // ★ 2026-09-05 변경 : Port B 는 이제 ILA 스캐너가 아니라 AXI 가 읽는다.
     //   clk_b 로 별도 클럭을 받는다 — 듀얼포트 BRAM 은 포트마다 클럭이 달라도
     //   되게 만들어진 물건이고, Port B 를 AXI 클럭으로 돌리면 AXI 쪽에서는
@@ -77,7 +93,8 @@ module tdc_histogram #(
         end else begin
             case (state)
                 STATE_IDLE: begin
-                    if (ts_valid) begin
+                    // ★ 2026-09-05 : en 이 0 이면 히트가 와도 받지 않는다.
+                    if (ts_valid && en) begin
                         active_addr <= ts_fine_idx;
                         state <= STATE_RMW_R;
                     end
@@ -114,6 +131,17 @@ module tdc_histogram #(
             endcase
         end
     end
+
+    // -------------------------------------------------------------------------
+    // ★ 2026-09-05 : 받아들인 히트 / 버린 히트
+    //   accepted : IDLE 에서 실제로 RMW 로 들어가는 순간. 이 개수가 곧 BRAM 에
+    //              반영된 히트 수이고, PS 가 읽는 384탭의 합과 같아야 한다.
+    //   dropped  : 누적이 허용된 상태인데(en=1) RMW 중이라 못 받은 히트.
+    //              en=0 일 때 온 히트는 애초에 측정 구간 밖이므로 세지 않는다.
+    // -------------------------------------------------------------------------
+    assign hit_accepted = (state == STATE_IDLE) && ts_valid && en;
+    assign hit_dropped  = (state != STATE_IDLE) && (state != STATE_CLEAR)
+                          && ts_valid && en;
 
     // -------------------------------------------------------------------------
     // 2. 조합 회로 제어 (Port A)
