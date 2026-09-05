@@ -8,7 +8,7 @@
 #
 #  [Zybo XDC 와 다른 점 — 이 세 가지뿐이다]
 #    1) 핀 배치 전부 (아래 §1)
-#    2) 클럭 포트 이름 clk_125 -> clk_100
+#    2) 클럭 : 온보드 발진기 -> PS7 FCLK_CLK0 (2026-09-04)
 #    3) 히트 입력이 단일선 -> LVDS 차동쌍 (IBUFDS 는 래퍼 안에 있다)
 #    4) ★ 2026-09-03 추가 — 캐리체인이 80단(320탭)이 아니라 112단(448탭)이다.
 #
@@ -52,9 +52,13 @@
 #=====================================================
 
 # --- PL 클럭 : 온보드 100 MHz 발진기(IC17), 뱅크 13 (3.3V 고정) ---
-set_property PACKAGE_PIN Y9 [get_ports clk_100]
-set_property IOSTANDARD LVCMOS33 [get_ports clk_100]
-create_clock -period 10.000 -name clk_100_pin [get_ports clk_100]
+# ★ [2026-09-04] Y9 온보드 발진기 제약 삭제.
+#   클럭이 PS7 의 FCLK_CLK0 로 바뀌어 이 핀을 쓰지 않는다 (tdc_zedboard_top.v 참조).
+#   FCLK 는 블록 디자인이 자동으로 제약하므로 여기에 create_clock 을 쓰지 않는다.
+#   되돌리려면 아래 세 줄을 살리고 top 에 clk_100 포트를 다시 넣으면 된다.
+# set_property PACKAGE_PIN Y9 [get_ports clk_100]
+# set_property IOSTANDARD LVCMOS33 [get_ports clk_100]
+# create_clock -period 10.000 -name clk_100_pin [get_ports clk_100]
 
 # --- 버튼 : 뱅크 34 (VADJ = 2.5V) ---
 #   rst_n 은 이름과 달리 MMCM 의 active-high reset 으로 들어간다(코어 설계 그대로).
@@ -154,7 +158,8 @@ resize_pblock [get_pblocks pblock_pipeline] -add {SLICE_X42Y0:SLICE_X59Y140}
 #=====================================================
 #5. 기타 제약 및 클럭 (ILA 포함)
 #=====================================================
-set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets -of_objects [get_ports clk_100]]
+# ★ [2026-09-04] clk_100 포트가 없어져 이 제약도 불필요해졌다.
+# set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets -of_objects [get_ports clk_100]]
 
 # 링 오실레이터 클럭 정의
 set_disable_timing -from I -to O [get_cells -hierarchical -filter {NAME =~ *u_bufg_ro}]

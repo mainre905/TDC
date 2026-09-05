@@ -21,8 +21,18 @@ module tdc_test_top #(
     input  wire       rst_n, 
     input  wire       btn_shift,   
     input  wire       ext_hit_in,  
-    output wire [3:0] led
+    output wire [3:0] led,
+
+    // ★ [2026-09-04 추가] AXI 레지스터 블록이 볼 TDC 도메인 신호들.
+    //   tdc_axi_regs 가 이 신호들을 AXI 도메인으로 동기화해 PS 에 보여준다.
+    //   2단계에서 시퀀서가 붙으면 busy/done 도 여기로 나온다.
+    output wire       o_tdc_clk,      // clk_200_fixed — AXI 레지스터의 TDC 도메인 클럭
+    output wire       o_locked,       // MMCM lock
+    output wire [30:0] o_dna,         // 보드 식별자 (ILA probe9 와 같은 31비트)
+    output wire       o_dna_valid,
+    output wire       o_phase_busy    // 위상 이동 중
 );
+
 
     // ★ [2026-09-03 추가] 탭 수 — 히스토그램 리드아웃 스캔 범위에 쓴다.
     //   히스토그램 BRAM 은 512칸(tdc_bram_512x32)이므로 448탭까지 그대로 담긴다.
@@ -582,4 +592,12 @@ module tdc_test_top #(
     //     .probe3 (current_loop_cnt),     // [8:0]
     //     .probe4 (aligned_fine_idx)      // [8:0]
     // );
+
+    // ★ [2026-09-04] AXI 레지스터 블록으로 내보내는 TDC 도메인 신호
+    assign o_tdc_clk    = clk_200_fixed;
+    assign o_locked     = clk_locked;
+    assign o_dna        = device_dna[30:0];
+    assign o_dna_valid  = device_dna_valid;
+    assign o_phase_busy = ps_busy;
+
 endmodule
