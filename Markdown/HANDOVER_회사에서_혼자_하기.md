@@ -9,23 +9,43 @@
 
 ---
 
-## 0. 30초 요약
+## 0. 30초 요약 — 배치 파일을 더블클릭하면 됩니다
 
-```bash
-# 1) 저장소 받기
-git clone https://github.com/mainre905/TDC.git
-cd TDC
+저장소 폴더에 배치 파일 세 개가 있습니다. **탐색기에서 더블클릭**하거나,
+그 폴더에서 **명령 프롬프트(cmd)** 를 열어 이름만 치면 됩니다.
 
-# 2) 빌드 (약 20~30분, 프로젝트 생성부터 비트스트림까지 전부 자동)
-"C:/Xilinx/Vivado/2024.1/bin/vivado.bat" -mode batch -source build_zedboard.tcl \
-    -tclargs 2 zed_pmod 1 1
-#                ↑모드 ↑폴더이름 ↑빌드까지 ↑히트입력(1=PMOD, 0=FMC LVDS)
+| 파일 | 하는 일 | 걸리는 시간 |
+|---|---|---|
+| **`run_build.bat`** | 프로젝트 생성 + 합성 + 비트스트림 | 20~30분 |
+| **`run_check.bat`** | 보드에 굽고 레지스터·Mode1 확인 + **danger 자동설정** | 1~2분 |
+| **`run_capture.bat`** | Mode 2 raw 캡처 | 30초 |
 
-# 3) 보드에 굽고 레지스터 확인 (약 1분)
-"C:/Xilinx/Vitis/2024.1/bin/xsct.bat" tcl/xsct_mode2_check.tcl 0 zed_pmod
+```
+run_build.bat
+run_check.bat
 ```
 
-Vitis로 하려면 §4로 가십시오.
+인자를 주고 싶으면 뒤에 붙입니다:
+
+```
+run_build.bat 2 zed_fmc 1 0      FMC LVDS 로 빌드
+run_check.bat 1                  Mode 2 까지 확인
+run_capture.bat 4096             4096발 raw 캡처
+```
+
+> **명령 프롬프트(cmd)** 에서 여십시오. PowerShell 이면 앞에 `.\` 를 붙여야 합니다
+> (`.un_build.bat`).
+>
+> 배치 파일 안은 **전부 영어**입니다. `.bat` 에 한글을 넣으면 cmd 가 코드페이지 때문에
+> 파싱을 깨뜨려 실행이 안 됩니다 (실제로 겪었습니다). 설명은 이 문서에 있습니다.
+
+저장소를 처음 받는다면:
+
+```
+git clone https://github.com/mainre905/TDC.git
+```
+
+Vitis 로 하려면 §4 로 가십시오.
 
 ---
 
@@ -44,13 +64,24 @@ Vitis로 하려면 §4로 가십시오.
 
 ## 2. Vivado 빌드
 
-### 2-1. 명령 한 줄
+### 2-1. 배치 파일로
 
-```bash
-cd C:/Work/FPGA/Project/Source/TDC
-"C:/Xilinx/Vivado/2024.1/bin/vivado.bat" -mode batch -source build_zedboard.tcl \
-    -tclargs <모드> <폴더이름> <빌드?> <히트입력>
 ```
+run_build.bat <모드> <폴더이름> <빌드?> <히트입력>
+```
+
+인자는 전부 생략할 수 있고, 생략하면 `2 zed_pmod 1 1` 입니다.
+
+<details><summary>배치 파일 없이 직접 치려면 — 반드시 한 줄로</summary>
+
+명령 프롬프트에서 **줄바꿈 없이**:
+
+```
+"C:\Xilinx\Vivado4.1inivado.bat" -mode batch -source build_zedboard.tcl -tclargs 2 zed_pmod 1 1
+```
+
+이전 문서에 있던 줄 끝 `\` 이어쓰기는 Git Bash 문법이라 cmd/PowerShell 에서는 안 됩니다.
+</details>
 
 | 인자 | 뜻 | 값 |
 |---|---|---|
@@ -136,7 +167,7 @@ run_capture.bat 4096       raw {coarse, fine} 캡처 4096 발
 분석:
 
 ```
-python pythonnalyze_chirp_capture.py
+python python/analyze_chirp_capture.py
 ```
 
 ---
