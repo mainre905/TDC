@@ -34,7 +34,7 @@ run_capture.bat 4096             4096발 raw 캡처
 ```
 
 > **명령 프롬프트(cmd)** 에서 여십시오. PowerShell 이면 앞에 `.\` 를 붙여야 합니다
-> (`.un_build.bat`).
+> (`.\run_build.bat`).
 >
 > 배치 파일 안은 **전부 영어**입니다. `.bat` 에 한글을 넣으면 cmd 가 코드페이지 때문에
 > 파싱을 깨뜨려 실행이 안 됩니다 (실제로 겪었습니다). 설명은 이 문서에 있습니다.
@@ -77,7 +77,7 @@ run_build.bat <모드> <폴더이름> <빌드?> <히트입력>
 명령 프롬프트에서 **줄바꿈 없이**:
 
 ```
-"C:\Xilinx\Vivado4.1inivado.bat" -mode batch -source build_zedboard.tcl -tclargs 2 zed_pmod 1 1
+"C:\Xilinx\Vivado\2024.1\bin\vivado.bat" -mode batch -source build_zedboard.tcl -tclargs 2 zed_pmod 1 1
 ```
 
 이전 문서에 있던 줄 끝 `\` 이어쓰기는 Git Bash 문법이라 cmd/PowerShell 에서는 안 됩니다.
