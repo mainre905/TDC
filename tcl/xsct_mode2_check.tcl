@@ -26,7 +26,11 @@
 #    vivado/mode2_check.log   /  vivado/histo_mux.csv  /  vivado/capture.csv
 # =============================================================================
 
-set PRJ  C:/Work/FPGA/Project/Source/TDC/vivado/zed_mode2
+# ★ 2026-09-05 : 프로젝트 이름을 두 번째 인자로 받는다 (기본 zed_mode2).
+#   PMOD 빌드는 zed_pmod 로 따로 만들므로 스크립트를 고치지 않고 쓸 수 있어야 한다.
+set PRJ_NAME zed_mode2
+if {[info exists argv] && [llength $argv] >= 2} { set PRJ_NAME [lindex $argv 1] }
+set PRJ  C:/Work/FPGA/Project/Source/TDC/vivado/$PRJ_NAME
 set LOG  C:/Work/FPGA/Project/Source/TDC/vivado/mode2_check.log
 set OUTH C:/Work/FPGA/Project/Source/TDC/vivado/histo_mux.csv
 set OUTC C:/Work/FPGA/Project/Source/TDC/vivado/capture.csv
@@ -51,8 +55,8 @@ set R_CAP    [expr {$BASE + 0x8000}]
 
 # ★ 2026-09-05 : 인자로 Mode 2 검사를 건너뛸 수 있다.
 #   외부 비교기가 없으면 B 는 어차피 0 발이 나온다. A(회귀 검사)만 돌린다.
-#     xsct tcl/xsct_mode2_check.tcl 0     -> A 만
-#     xsct tcl/xsct_mode2_check.tcl       -> A + B
+#     xsct tcl/xsct_mode2_check.tcl 0             -> A 만, 프로젝트 zed_mode2
+#     xsct tcl/xsct_mode2_check.tcl 1 zed_pmod    -> A + B, 프로젝트 zed_pmod
 set DO_MODE2 1
 if {[info exists argv] && [llength $argv] >= 1} { set DO_MODE2 [lindex $argv 0] }
 
@@ -67,14 +71,15 @@ set REF_H  2000000
 set SRC_RO    0x01
 set SRC_EXT   0x03
 set BIT_START [expr {1 << 2}]
-set CAP_N     1024          ;# 1024 발. 60 kHz 면 17 ms, 1 MHz 면 1 ms
+set CAP_N     1024          ;# 1024 발. 1 kHz 면 1 초, 60 kHz 면 17 ms, 1 MHz 면 1 ms
+set B_TIMEOUT 20000         ;# STM32 주파수를 모르므로 넉넉히 20 초 기다린다
 
 proc find_one {pat desc} {
     set f [glob -nocomplain $pat]
     if {[llength $f] == 0} { error "$desc 를 못 찾았다: $pat" }
     return [lindex $f 0]
 }
-set BIT      [find_one $PRJ/zed_mode2.runs/impl_1/*.bit "비트스트림"]
+set BIT      [find_one $PRJ/$PRJ_NAME.runs/impl_1/*.bit "비트스트림"]
 set PS7_INIT [find_one $PRJ/*.gen/sources_1/bd/ps_sys/ip/*ps7_0_0/ps7_init.tcl "ps7_init.tcl"]
 say "\[*\] bit : $BIT"
 
@@ -228,7 +233,7 @@ mwr -force $R_CTRL [expr {$SRC_EXT | $BIT_START}]
 set t0 [clock milliseconds]
 set done 0
 set last_cnt -1
-while {([clock milliseconds]-$t0) < 10000} {
+while {([clock milliseconds]-$t0) < $B_TIMEOUT} {
     set st [rd $R_STATUS]
     set c  [rd $R_CAPCNT]
     if {$c != $last_cnt} {
@@ -244,17 +249,26 @@ say [format "  최종 CAP_CNT = %d / %d   (DONE=%d)" $cap_cnt $CAP_N $done]
 if {$cap_cnt == 0} {
     say ""
     say "  ***** 히트가 한 발도 안 들어왔다. 순서대로 확인할 것:"
+    say "        [HIT_INPUT=1 : PMOD 단선 빌드일 때]"
+    say "        1) 점퍼가 PMOD JA1 1번 핀(Y11)에 꽂혀 있는가"
+    say "           -> Y11 = JA1 1번 이라는 대응은 매뉴얼 기준이고 문서 대조는"
+    say "              아직 안 했다. 실크스크린을 확인할 것."
+    say "        2) STM32 와 ZedBoard 의 GND 가 연결돼 있는가 (필수)"
+    say "        3) STM32 가 실제로 신호를 내보내고 있는가 (스코프로 확인)"
+    say "        4) 신호 레벨이 3.3V 인가 (뱅크 13 은 LVCMOS33)"
+    say "        [HIT_INPUT=0 : FMC LVDS 빌드일 때]"
     say "        1) ZedBoard 점퍼 J18 이 2.5V 인가 (기본값은 1.8V 다)"
-    say "           -> 1.8V 면 LVDS_25 수신과 DIFF_TERM 이 규격 밖이다"
     say "        2) 비교기 보드가 FMC LPC 에 꽂혀 있고 전원이 들어왔는가"
-    say "        3) 비트 신호(보조 간섭계)가 실제로 나오고 있는가"
-    say "        4) LA27_P/N (E21/D21) 배선이 맞는가"
+    say "        3) LA27_P/N (E21/D21) 배선이 맞는가"
     incr fail
 } else {
     say "  OK    외부 LVDS 히트가 들어온다"
 
     # ---- 타임스탬프를 읽어 간격을 본다 ----
-    set n [expr {$cap_cnt < 256 ? $cap_cnt : 256}]
+    # ★ 2026-09-06 : 256 -> 전량. STM32 가 chirp 를 모사하므로 램프를 여러 개
+    #   봐야 톱니 모양을 확인할 수 있다. 256 발이면 램프 하나도 못 채울 수 있다.
+    #   1024 발이면 AXI 읽기 2048 회 = 약 0.3 초라 부담 없다.
+    set n $cap_cnt
     set w [rd_block $R_CAP [expr {$n*2}]]
     set fh [open $OUTC w]
     puts $fh "Index,Timestamp_ps"
@@ -281,7 +295,11 @@ if {$cap_cnt == 0} {
             say [format "  중앙 간격 %.2f us  ->  비트 주파수 %.1f kHz" \
                     [expr {$med/1.0e6}] [expr {1.0e6/($med/1.0e6)/1000.0}]]
         }
-        say "  ※ 9/3 스코프 실측 : 비트 34~86 kHz, ILA 히트 간격 중앙값 15.95 us"
+        say "  ※ 판정 : 이 간격이 STM32 가 내보낸 주기와 맞아야 진짜 확인이다."
+        say "     참고로 9/3 스코프 실측(FMCW 비트 신호)은 34~86 kHz,"
+        say "     ILA 히트 간격 중앙값 15.95 us 였다."
+        say "  ※ 간격이 들쭉날쭉하면 STM32 지터이거나 히트가 씹힌 것이다."
+        say "     최소/최대가 중앙값의 2배 넘게 벌어지면 DROP_CNT 를 함께 볼 것."
         if {$med <= 0} {
             say "  FAIL  간격이 0 이하다 — 타임스탬프가 단조증가하지 않는다"
             incr fail
