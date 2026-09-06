@@ -26,6 +26,34 @@
 #            lock 이 걸렸다는 것은 FCLK_CLK0 이 100 MHz 근방으로 나온다는 뜻이다.
 #        단, MMCM lock 허용 범위는 넓다. 이 두 근거는 "발진기가 33.333 MHz 계열이 맞다"
 #        까지를 보장하며, 클럭 주기가 정확히 5000.0 ps 라는 뜻은 아니다.
+#    ★★ 2026-09-06 : MIO 뱅크 전압을 반드시 지정해야 한다 — 이걸 빠뜨려서 UART 수신이
+#      완전히 죽었다. 증상이 아주 헷갈리므로 그대로 적어 둔다.
+#
+#      [증상] 보드가 배너를 UART 로 잘 뿌린다(TX 정상). 그런데 터미널에서 키를 눌러도
+#        아무 반응이 없다(RX 완전 불통). Vitis Serial Terminal 을 PuTTY 로 바꿔도 같다.
+#        JTAG 로 UART1 상태 레지스터(0xE000102C)를 20초간 직접 폴링해도 RX FIFO 에
+#        단 한 바이트도 안 들어온다. 즉 소프트웨어가 아니라 전기적 문제다.
+#
+#      [원인] ZedBoard 매뉴얼(ZedBoard_HW_UG_v2_2.pdf) Table 21 :
+#          MIO Bank 0/500 = 3.3V,  MIO Bank 1/501 = 1.8V
+#        UART1 은 MIO[48:49] 로 Bank 1/501(1.8V)에 있다. 그런데 PS7 IP 의 기본값은
+#        두 뱅크 모두 3.3V 라, 이 설정을 안 하면 MIO48/49 가 LVCMOS33 으로 잡힌다.
+#        (ps7_init.tcl 의 mask_write 0xF80007C0/C4 값 0x16E0/0x16E1 을 디코딩하면
+#         IO_Type=3=LVCMOS33 이 나온다)
+#
+#      [왜 TX 는 되고 RX 만 죽나]
+#        출력은 실제 나가는 전압을 뱅크 전원(1.8V)이 정하므로, 설정이 3.3V 여도
+#        1.8V 가 나가고 보드의 TXS0102 레벨 시프터가 3.3V 로 올려 준다 -> TX 정상.
+#        입력은 판정 문턱이 LVCMOS33 기준(VIH 약 2.0V)으로 잡히는데, 레벨 시프터가
+#        1.8V 쪽으로 내보내는 최대치가 1.8V 다. 1.8V < 2.0V 이므로 Zynq 가 HIGH 를
+#        영원히 인식하지 못한다 -> RX 완전 불통.
+#
+#      [고친 뒤] IO_Type 이 LVCMOS18(1) 이 되어 0x12E0/0x12E1 로 바뀐다.
+#        문턱이 약 1.17V 로 내려가 1.8V 신호를 정상 인식한다. (2026-09-06 검증 완료)
+#
+#      ※ Bank 0/500 은 3.3V 가 맞으므로 기본값과 같지만, "확인하고 그렇게 둔 것"임을
+#        분명히 하려고 명시적으로 적었다.
+#
 #    ★ 2026-09-06 : UART1 (MIO 48/49, 115200) 을 켰다.
 #      [왜] 지금까지는 XSCT 가 JTAG DAP 로 메모리를 직접 두드려 검증했으므로
 #        콘솔이 필요 없었다. 그런데 Vitis 에서 C 프로그램을 돌리면 printf 가
@@ -68,6 +96,9 @@ set_property -dict [list \
     CONFIG.PCW_UART1_PERIPHERAL_ENABLE    {1} \
     CONFIG.PCW_UART1_UART1_IO             {MIO 48 .. 49} \
     CONFIG.PCW_UART1_BAUD_RATE            {115200} \
+    \
+    CONFIG.PCW_PRESET_BANK0_VOLTAGE       {LVCMOS 3.3V} \
+    CONFIG.PCW_PRESET_BANK1_VOLTAGE       {LVCMOS 1.8V} \
 ] [get_bd_cells ps7_0]
 
 # ---------------------------------------------------------------- PS 전용 핀
