@@ -118,15 +118,10 @@ WNS / WHS 가 둘 다 양수인가        (스크립트가 마지막에 찍는�
 가장 빠른 검증입니다. **C 프로그램을 만들 필요가 없습니다** — XSCT 가 JTAG 로 ARM 코어에
 붙어 메모리를 직접 읽고 씁니다.
 
-```bash
-# 레지스터 + Mode 1 회귀 + danger 자동 설정 (Mode 2 는 건너뜀)
-"C:/Xilinx/Vitis/2024.1/bin/xsct.bat" tcl/xsct_mode2_check.tcl 0 zed_pmod
-
-# Mode 2 까지 (신호가 들어오고 있을 때)
-"C:/Xilinx/Vitis/2024.1/bin/xsct.bat" tcl/xsct_mode2_check.tcl 1 zed_pmod
-
-# raw {coarse, fine} 캡처 4096 발
-"C:/Xilinx/Vitis/2024.1/bin/xsct.bat" tcl/xsct_capture_raw.tcl zed_pmod 4096
+```
+run_check.bat              레지스터 + Mode 1 + danger 자동설정 (Mode 2 건너뜀)
+run_check.bat 1            Mode 2 까지 (신호가 들어오고 있을 때)
+run_capture.bat 4096       raw {coarse, fine} 캡처 4096 발
 ```
 
 결과는 화면과 **파일 양쪽**에 남습니다:
@@ -140,8 +135,8 @@ WNS / WHS 가 둘 다 양수인가        (스크립트가 마지막에 찍는�
 
 분석:
 
-```bash
-python python/analyze_chirp_capture.py          # 캡처를 STM32 참값과 대조
+```
+python pythonnalyze_chirp_capture.py
 ```
 
 ---
@@ -412,7 +407,10 @@ RO 주파수    f_RO [Hz] = RO_CNT × 4 / 0.01 s   히트율 = f_RO / 64
 
 | 경로 | 내용 |
 |---|---|
-| `build_zedboard.tcl` | 프로젝트 생성 + IP 3개 + BD + 합성/구현 |
+| **`run_build.bat`** | **빌드 (더블클릭)** |
+| **`run_check.bat`** | **보드 확인 + danger 자동설정 (더블클릭)** |
+| **`run_capture.bat`** | **raw 캡처 (더블클릭)** |
+| `build_zedboard.tcl` | 위 배치가 부르는 실제 스크립트 |
 | `tcl/bd_ps_sys.tcl` | PS7 블록 디자인 (UART1 포함) |
 | `tcl/xsct_mode2_check.tcl` | 레지스터 + Mode 1 회귀 + danger 자동설정 + Mode 2 |
 | `tcl/xsct_capture_raw.tcl` | raw `{coarse,fine}` 캡처 |
