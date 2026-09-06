@@ -26,8 +26,23 @@
 #            lock 이 걸렸다는 것은 FCLK_CLK0 이 100 MHz 근방으로 나온다는 뜻이다.
 #        단, MMCM lock 허용 범위는 넓다. 이 두 근거는 "발진기가 33.333 MHz 계열이 맞다"
 #        까지를 보장하며, 클럭 주기가 정확히 5000.0 ps 라는 뜻은 아니다.
-#    ※ DDR / MIO 는 기본값 그대로 둔다. 1단계 검증은 XSCT 가 JTAG DAP 로
-#      GP0 를 직접 두드리는 것이라 DDR 도 콘솔도 필요 없다.
+#    ★ 2026-09-06 : UART1 (MIO 48/49, 115200) 을 켰다.
+#      [왜] 지금까지는 XSCT 가 JTAG DAP 로 메모리를 직접 두드려 검증했으므로
+#        콘솔이 필요 없었다. 그런데 Vitis 에서 C 프로그램을 돌리면 printf 가
+#        나갈 곳이 있어야 한다. ZedBoard 의 USB-UART 가 MIO 48/49 에 물려 있다.
+#        (PS 전용 핀이라 XDC 에 아무것도 안 써도 된다)
+#      [확인] 보드를 USB 로 연결하면 PC 에 COM 포트가 하나 더 생긴다.
+#        터미널을 115200-8-N-1 로 열면 된다.
+#
+#    ※ DDR 파라미터는 기본값 그대로 둔다.
+#      [왜 안 건드리나] ZedBoard 의 DDR3 는 MT41K128M16 이고, 보드마다 배선 지연
+#        (DQS_TO_CLK_DELAY, BOARD_DELAY) 값이 다르다. 보드 파일 없이 손으로 넣으면
+#        틀리기 쉽고, 틀리면 조용히 동작하다 가끔 깨진다.
+#      [그래서 Vitis 에서 할 일] 애플리케이션의 링커 스크립트에서 메모리 영역을
+#        **ps7_ram_0 (OCM, 256 KB)** 로 지정할 것. 우리 프로그램은 히스토그램
+#        384칸(1.5 KB)과 캡처 4096발(32 KB) 정도라 OCM 으로 충분하다.
+#        DDR 을 제대로 쓰려면 Digilent 보드 파일을 설치해 ZedBoard 프리셋을
+#        적용하는 것이 정석이다.
 #
 #  [사용법]  build_zedboard.tcl 이 source 한다. 단독 실행도 가능:
 #    vivado -mode batch -source tcl/bd_ps_sys.tcl
@@ -49,6 +64,10 @@ set_property -dict [list \
     CONFIG.PCW_USE_M_AXI_GP0              {1} \
     CONFIG.PCW_EN_CLK0_PORT               {1} \
     CONFIG.PCW_FPGA0_PERIPHERAL_FREQMHZ   {100} \
+    \
+    CONFIG.PCW_UART1_PERIPHERAL_ENABLE    {1} \
+    CONFIG.PCW_UART1_UART1_IO             {MIO 48 .. 49} \
+    CONFIG.PCW_UART1_BAUD_RATE            {115200} \
 ] [get_bd_cells ps7_0]
 
 # ---------------------------------------------------------------- PS 전용 핀

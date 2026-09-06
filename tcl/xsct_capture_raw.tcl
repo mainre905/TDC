@@ -42,7 +42,13 @@ set R_CAP    [expr {$BASE + 0x8000}]
 set SRC_EXT     0x03
 set BIT_START   [expr {1 << 2}]
 set BIT_CAP_FMT [expr {1 << 6}]     ;# 1 = raw {coarse, fine}
-set CAP_N       1024
+# ★ 2026-09-06 : CAP_N 을 인자로 받는다 (두 번째 인자, 기본 4096 = 버퍼 최대).
+#   STM32 코드가 램프를 5 ms / 100 kHz -> 1 MHz 로 정의하므로, 램프 하나의 펄스 수는
+#   적분하면 평균 550 kHz x 5 ms = 약 2750 발이다. 버퍼가 4096 발이므로 램프 하나를
+#   통째로 담을 수 있다. 1024 로 잡으면 램프 중간 토막만 잡혀 F_START/F_END 를
+#   확인할 수 없다 (2026-09-06 에 실제로 그랬다).
+set CAP_N 4096
+if {[info exists argv] && [llength $argv] >= 2} { set CAP_N [lindex $argv 1] }
 
 connect
 after 3000
@@ -57,12 +63,12 @@ proc rd_block {addr n} {
     return $out
 }
 
-say "\[*\] raw 캡처 (CAP_FMT=1)"
+say [format "\[*\] raw 캡처 (CAP_FMT=1), CAP_N = %d" $CAP_N]
 mwr -force $R_CAPN $CAP_N
 mwr -force $R_CTRL [expr {$SRC_EXT | $BIT_START | $BIT_CAP_FMT}]
 
 set t0 [clock milliseconds]
-while {([clock milliseconds]-$t0) < 20000} {
+while {([clock milliseconds]-$t0) < 30000} {
     if {([rd $R_STATUS] >> 4) & 1} { break }
 }
 set n [rd $R_CAPCNT]
