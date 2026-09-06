@@ -4,6 +4,10 @@
 > **작성** Claude Opus 5 (Claude Code)
 > **용도** 회사 PC 에서 Claude 없이 혼자 빌드·테스트하기 위한 절차서.
 > **검증** 2026-09-06, 이 절차대로 빌드해 **UART 키 입력까지 동작하는 것을 사용자가 확인**했다.
+> **수정** 2026-09-06 16:23 — 히트 입력을 PMOD 에서 **FMC LVDS 로 변경**. 회사에서 고속
+> 비교기(TLV3605)를 E21/D21 차동쌍에 물려 쓰기 위해서다. 빌드 인자를
+> `{2 zed_fmc 0 0}` 으로 바꾸고, 프로젝트 폴더명·신호원·문제해결 항목을 함께 고쳤다.
+> J18 점퍼 관련 안내는 이미 2.5V 로 설정해 두어 제거했다.
 > **관련** 더 넓은 배경·문제해결은 `Markdown/HANDOVER_회사에서_혼자_하기.md` 참조.
 
 ---
@@ -37,7 +41,7 @@ Vivado GUI 버튼과 Vitis GUI 버튼으로 전부 됩니다. **Tcl Console 을 
 | Vitis | 2024.1 Unified IDE |
 | 저장소 | `C:\Work\FPGA\Project\Source\TDC` |
 | 보드 | ZedBoard (XC7Z020-CLG484-1), USB-JTAG + USB-UART 연결 |
-| 신호원 | STM32 를 PMOD JA1(Y11) 에 점퍼로 연결 (Mode 2 용). **GND 도 반드시 연결** |
+| 신호원 | 고속 비교기(TLV3605)를 **FMC LPC 의 E21/D21 차동쌍**에 연결 (Mode 2 용). **GND 도 반드시 연결** |
 
 ### 미리 확인해 둘 것
 
@@ -60,7 +64,7 @@ Vivado GUI 버튼과 Vitis GUI 버튼으로 전부 됩니다. **Tcl Console 을 
 
 ```tcl
 cd C:/Work/FPGA/Project/Source/TDC
-set argv {2 zed_uart 0 1}
+set argv {2 zed_fmc 0 0}
 source build_zedboard.tcl
 ```
 
@@ -72,9 +76,13 @@ source build_zedboard.tcl
 | 순서 | 값 | 뜻 |
 |---|---|---|
 | 1 | `2` | `OPERATION_MODE`. **0 만 아니면 결과가 같습니다** (§12-1 참조) |
-| 2 | `zed_uart` | 프로젝트 폴더 = `vivado\zed_uart`. **이미 있으면 에러**가 나니 다른 이름을 주십시오 |
+| 2 | `zed_fmc` | 프로젝트 폴더 = `vivado\zed_fmc`. **이미 있으면 에러**가 나니 다른 이름을 주십시오 |
 | 3 | `0` | **합성 안 함** (직접 GUI 로 하려고) |
-| 4 | `1` | `HIT_INPUT` = **PMOD 단선 Y11**. `0` 이면 FMC LVDS(E21/D21) |
+| 4 | `0` | `HIT_INPUT` = **FMC LVDS (E21/D21)**. `1` 이면 PMOD 단선 Y11 |
+
+> **★ 네 번째 인자를 빠뜨리지 마십시오.** 안 주면 기본값 `0`(FMC LVDS)이 쓰입니다
+> ([build_zedboard.tcl:51](../build_zedboard.tcl#L51)). 지금은 그게 원하는 값이지만,
+> STM32 를 PMOD 로 받으려면 반드시 `1` 을 명시해야 합니다.
 
 ### 이 단계가 만드는 것
 
@@ -179,7 +187,7 @@ XDC 에 남아 있는 옛 Zybo용 절대경로 제약(`{u_tdc/...}`) 때문입�
 **비트스트림 생성을 막지 않습니다** — 지난 빌드들에서도 이게 뜬 채 정상 완료됐습니다.
 
 만들어지는 파일:
-`vivado\zed_uart\zed_uart.runs\impl_1\tdc_zedboard_top.bit`
+`vivado\zed_fmc\zed_fmc.runs\impl_1\tdc_zedboard_top.bit`
 
 ---
 
@@ -208,7 +216,7 @@ XDC 에 남아 있는 옛 Zybo용 절대경로 제약(`{u_tdc/...}`) 때문입�
 3. **Finish**
 
 만들어지는 파일:
-`C:\Work\FPGA\Project\Source\TDC\vivado\zed_uart\tdc_zedboard_top.xsa`
+`C:\Work\FPGA\Project\Source\TDC\vivado\zed_fmc\tdc_zedboard_top.xsa`
 
 ---
 
@@ -219,7 +227,7 @@ XDC 에 남아 있는 옛 Zybo용 절대경로 제약(`{u_tdc/...}`) 때문입�
 시작 → `cmd` 실행 → 붙여넣기:
 
 ```
-findstr /S /C:"0XF80007C0" C:\Work\FPGA\Project\Source\TDC\vivado\zed_uart\*.tcl
+findstr /S /C:"0XF80007C0" C:\Work\FPGA\Project\Source\TDC\vivado\zed_fmc\*.tcl
 ```
 
 ### 판정
@@ -451,14 +459,14 @@ RO 4주기당 1카운트. 게이트 10 ms.) 실측 약 **55.5 MHz**.
 | 증상 | 원인 / 조치 |
 |---|---|
 | `COE 가 없다` 로 2단계가 멈춘다 | `python/*.coe` 는 `.gitignore` 대상. §1 참조 |
-| `이미 있다: .../vivado/zed_uart` | 폴더가 이미 있음. 지우거나 2번째 인자로 다른 이름을 |
-| 합성 실패 | `vivado\zed_uart\zed_uart.runs\synth_1\runme.log` 확인 |
+| `이미 있다: .../vivado/zed_fmc` | 폴더가 이미 있음. 지우거나 2번째 인자로 다른 이름을 |
+| 합성 실패 | `vivado\zed_fmc\zed_fmc.runs\synth_1\runme.log` 확인 |
 | `CRITICAL WARNING [Vivado 12-2285]` | **무시.** 옛 Zybo용 XDC 잔재. 빌드를 막지 않음 |
 | WHS 음수 | 5단계 전략이 안 걸렸다. **파이프라인 추가는 역효과** |
 | 배너는 나오는데 키가 안 먹는다 | ① §9 의 MIO 전압(`0x12E0`) ② §10-2 의 `stdin` |
 | Vitis 앱이 뜨자마자 죽는다 | §10-6 의 링커 스크립트가 `ps7_ram_0` 인지 |
 | 레지스터가 전부 `0xDEAD_0000` | AXI 주소 디코딩 밖을 읽고 있다. 베이스 주소 확인 |
-| Mode 2 에서 히트가 한 발도 안 들어온다 | ① 신호원이 실제로 내보내는가(스코프) ② **GND 연결** ③ `HIT_INPUT` 이 1(PMOD)인가 |
+| Mode 2 에서 히트가 한 발도 안 들어온다 | ① 신호원이 실제로 내보내는가(스코프) ② **GND 연결** ③ `HIT_INPUT` 이 0(FMC LVDS)인가 ④ 차동쌍 극성(E21=P / D21=N)이 뒤집히지 않았는가 |
 | 히스토그램이 텅 비었다 | `1` 키 없이 `d` 를 눌렀다. `1` → `d` 순서 |
 
 ---
